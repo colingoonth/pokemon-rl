@@ -46,6 +46,14 @@ ADDR_PLAYER_X          = 0xD362  # u8, X coordinate on current map
 ADDR_MONEY             = 0xD347  # 3 bytes BCD (big-endian)
 ADDR_IN_BATTLE         = 0xD057  # u8, 0=overworld, 1=wild, 2=trainer
 
+# Battle-time addresses. These are read during in_battle != 0.
+# All best-guess from pret/pokered; verify with verify_battle_state before
+# trusting in a reward function.
+ADDR_ENEMY_MON_SPECIES = 0xCFE5  # u8, species id of current enemy mon
+ADDR_ENEMY_MON_HP      = 0xCFE6  # u16 big-endian, enemy mon current HP
+ADDR_TRAINER_CLASS     = 0xD059  # u8, trainer class id (e.g. JR_TRAINER_F)
+ADDR_TRAINER_NUMBER    = 0xD05D  # u8, specific trainer within the class
+
 # Event flags: a long bitarray. Each story flag is one bit somewhere in here.
 ADDR_EVENT_FLAGS_START = 0xD747
 ADDR_EVENT_FLAGS_END   = 0xD886  # inclusive
@@ -129,6 +137,19 @@ def money(mem: MemoryView) -> int:
 
 def in_battle(mem: MemoryView) -> int:
     return read_u8(mem, ADDR_IN_BATTLE)
+
+
+def enemy_mon_species(mem: MemoryView) -> int:
+    return read_u8(mem, ADDR_ENEMY_MON_SPECIES)
+
+
+def enemy_mon_hp(mem: MemoryView) -> int:
+    return read_u16_be(mem, ADDR_ENEMY_MON_HP)
+
+
+def trainer_id(mem: MemoryView) -> tuple[int, int]:
+    """(class, number) — uniquely identifies a trainer in Pokemon Red."""
+    return read_u8(mem, ADDR_TRAINER_CLASS), read_u8(mem, ADDR_TRAINER_NUMBER)
 
 
 def event_flags_popcount(mem: MemoryView) -> int:

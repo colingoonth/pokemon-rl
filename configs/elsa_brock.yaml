@@ -5,6 +5,7 @@ run_name: elsa_brock
 total_timesteps: 200_000_000
 n_envs: 32
 async_envs: true   # multi-process envs to escape the Python GIL
+reward_class: RewardV2
 n_steps: 256        # 32 * 256 = 8192 timesteps per rollout
 n_epochs: 4
 minibatch_size: 512  # 8192 / 16 minibatches per epoch

@@ -15,6 +15,7 @@ import torch
 
 from pokerl.agent.ppo import train
 from pokerl.env.make import make_vec_env
+from pokerl.env.rewards import get_reward_cls
 from pokerl.infra.config import load_ppo_config
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--device", default=None,
                    help="Override device (cpu / cuda). Default: auto.")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="Warm-start: load this checkpoint into the policy "
+                        "before training begins. Useful when continuing an "
+                        "earlier run; harmful when the earlier run learned "
+                        "a degenerate policy you want to discard.")
     return p.parse_args()
 
 
@@ -47,6 +53,9 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"PPO:    {cfg}")
 
+    reward_cls = get_reward_cls(cfg.reward_class)
+    print(f"Reward: {cfg.reward_class}")
+
     def env_fn():
         return make_vec_env(
             n_envs=cfg.n_envs,
@@ -54,9 +63,10 @@ def main() -> None:
             max_steps=4096,
             frame_stack=4,
             async_envs=cfg.async_envs,
+            reward_cls=reward_cls,
         )
 
-    net = train(env_fn, cfg)
+    net = train(env_fn, cfg, resume_path=args.resume)
     torch.save(net.state_dict(), run_dir / "final.pt")
     print(f"Saved final checkpoint -> {run_dir / 'final.pt'}")
 

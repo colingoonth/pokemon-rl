@@ -49,6 +49,7 @@ class PPOConfig:
     log_csv: str | None = None
     async_envs: bool = False      # multi-process envs to escape the GIL
     save_every: int = 100         # iterations between intermediate checkpoints; 0 disables
+    reward_class: str = "RewardV2"  # which Reward subclass make_vec_env should instantiate
 
 
 @dataclass
@@ -106,7 +107,11 @@ class RolloutBuffer:
         self.returns = advantages + self.values
 
 
-def train(env_fn: Callable[[], VectorEnv], cfg: PPOConfig) -> ActorCritic:
+def train(
+    env_fn: Callable[[], VectorEnv],
+    cfg: PPOConfig,
+    resume_path: Path | None = None,
+) -> ActorCritic:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
@@ -121,6 +126,10 @@ def train(env_fn: Callable[[], VectorEnv], cfg: PPOConfig) -> ActorCritic:
 
     device = torch.device(cfg.device)
     net = ActorCritic(obs_shape, n_actions=n_actions).to(device)
+    if resume_path is not None:
+        state = torch.load(resume_path, map_location=device, weights_only=True)
+        net.load_state_dict(state)
+        print(f"Resumed weights from {resume_path}")
     optimizer = optim.Adam(net.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     obs_np, _ = envs.reset(seed=cfg.seed)
