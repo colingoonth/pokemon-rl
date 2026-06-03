@@ -4,6 +4,7 @@
 #SBATCH --error=/scratch/guenthc1/pokemon-rl/runs/brock_%j/train.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
+#SBATCH --constraint=l40s
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --time=48:00:00
