@@ -1,19 +1,29 @@
 """Play Pokemon Red interactively; save state on quit.
 
-Used once to create states/post_intro.state — the canonical training start
-position. Every env reset loads from this state so the agent skips the
-unskippable Oak intro.
+Default writes to states/post_intro.state — the canonical training
+start. Pass --out to save somewhere else (useful for capturing
+specific game states like an in-battle save for RAM verification).
 """
+import argparse
 from pathlib import Path
 
 from pyboy import PyBoy
 
 ROOT = Path(__file__).resolve().parents[2]
 ROM = ROOT / "roms" / "pokemon_red.gb"
-STATE = ROOT / "states" / "post_intro.state"
+DEFAULT_STATE = ROOT / "states" / "post_intro.state"
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--out", type=Path, default=DEFAULT_STATE,
+                   help="Output path for the save state (default: states/post_intro.state).")
+    return p.parse_args()
 
 
 def main() -> None:
+    args = parse_args()
+    STATE = args.out
     if not ROM.exists():
         raise SystemExit(f"ROM not found at {ROM}")
 
