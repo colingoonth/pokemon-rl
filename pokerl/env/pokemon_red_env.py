@@ -117,6 +117,11 @@ class PokemonRedEnv(gym.Env):
             arr = arr[..., :3]
         return arr
 
+    def unique_tiles_visited(self) -> int:
+        """Expose reward-fn exploration stats across vector wrappers (incl. async)."""
+        fn = getattr(self, "reward_fn", None)
+        return int(getattr(fn, "unique_tiles_visited", 0)) if fn is not None else 0
+
     def _obs(self) -> np.ndarray:
         """Downsampled grayscale screen, (SCREEN_H, SCREEN_W) uint8."""
         rgb = self._screen_rgb()

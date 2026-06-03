@@ -53,6 +53,7 @@ def main() -> None:
             headless=True,
             max_steps=4096,
             frame_stack=4,
+            async_envs=cfg.async_envs,
         )
 
     net = train(env_fn, cfg)

@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from gymnasium.vector import SyncVectorEnv
+from gymnasium.vector import VectorEnv
 from torch.distributions import Categorical
 
 from pokerl.agent.networks import ActorCritic
@@ -46,6 +46,7 @@ class PPOConfig:
     device: str = "cpu"
     log_every: int = 1
     log_csv: str | None = None
+    async_envs: bool = False      # multi-process envs to escape the GIL
 
 
 @dataclass
@@ -103,7 +104,7 @@ class RolloutBuffer:
         self.returns = advantages + self.values
 
 
-def train(env_fn: Callable[[], SyncVectorEnv], cfg: PPOConfig) -> ActorCritic:
+def train(env_fn: Callable[[], VectorEnv], cfg: PPOConfig) -> ActorCritic:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
@@ -243,12 +244,13 @@ def train(env_fn: Callable[[], SyncVectorEnv], cfg: PPOConfig) -> ActorCritic:
         mean_ret = float(np.mean(recent))
         episode_count = len(finished_returns)
 
-        # Pull aggregate exploration stats across all envs
-        unique_tiles_total = 0
-        for sub_env in getattr(envs, "envs", []):
-            rf = getattr(sub_env.unwrapped, "reward_fn", None)
-            if rf is not None and hasattr(rf, "unique_tiles_visited"):
-                unique_tiles_total += rf.unique_tiles_visited
+        # Pull aggregate exploration stats across all envs. Use envs.call so
+        # it works for both Sync and Async vector envs.
+        try:
+            tiles_per_env = envs.call("unique_tiles_visited")
+            unique_tiles_total = int(sum(tiles_per_env))
+        except Exception:
+            unique_tiles_total = 0
 
         if iteration % cfg.log_every == 0:
             print(

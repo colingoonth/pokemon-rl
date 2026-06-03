@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 import gymnasium as gym
-from gymnasium.vector import SyncVectorEnv
+from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv, VectorEnv
 
 from pokerl.env.pokemon_red_env import PokemonRedEnv
 from pokerl.env.rewards import Reward, RewardV1
@@ -45,11 +45,18 @@ def make_vec_env(
     max_steps: int = 4096,
     frame_stack: int = 4,
     reward_cls: Callable[[], Reward] = RewardV1,
-) -> SyncVectorEnv:
+    async_envs: bool = False,
+) -> VectorEnv:
     """Construct a vectorized env with `n_envs` parallel PokemonRed instances.
 
     Each env gets its own freshly-constructed Reward instance so per-env
     exploration sets don't bleed across envs.
+
+    async_envs=True puts each env in its own subprocess (gym.vector.
+    AsyncVectorEnv). True parallelism — sidesteps the Python GIL so 32
+    PyBoy instances actually run in parallel instead of serially.
+    Recommended on real training runs. Sync is fine for unit tests and
+    small dev loops.
     """
 
     def _make_one() -> Callable[[], gym.Env]:
@@ -64,4 +71,7 @@ def make_vec_env(
             )
         return thunk
 
-    return SyncVectorEnv([_make_one() for _ in range(n_envs)])
+    env_fns = [_make_one() for _ in range(n_envs)]
+    if async_envs:
+        return AsyncVectorEnv(env_fns)
+    return SyncVectorEnv(env_fns)
