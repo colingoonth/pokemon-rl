@@ -29,9 +29,13 @@ def main() -> None:
 
     start = time.time()
     frames_for_gif = [env.render()]
+    total_reward = 0.0
+    rewards_per_step: list[float] = []
     for i in range(N_STEPS):
         action = int(rng.integers(0, env.action_space.n))
         obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
+        rewards_per_step.append(reward)
         if i % 25 == 0:
             frames_for_gif.append(env.render())
         if terminated or truncated:
@@ -44,11 +48,17 @@ def main() -> None:
     final_png = OUT_DIR / "random_rollout_final.png"
     iio.imwrite(final_png, env.render())
 
+    nonzero = sum(1 for r in rewards_per_step if r > 0)
+    tiles_visited = env.reward_fn.unique_tiles_visited  # type: ignore[attr-defined]
+
     env.close()
 
     print(f"Ran {N_STEPS} random steps in {elapsed:.2f}s "
           f"({N_STEPS / elapsed:.1f} steps/s)")
     print(f"Observation shape: {obs.shape}, dtype: {obs.dtype}")
+    print(f"Total return:        {total_reward:.3f}")
+    print(f"Positive-reward steps: {nonzero} / {N_STEPS}")
+    print(f"Unique tiles visited:  {tiles_visited}")
     print(f"Wrote gif:   {gif_path} ({len(frames_for_gif)} frames)")
     print(f"Wrote final: {final_png}")
 

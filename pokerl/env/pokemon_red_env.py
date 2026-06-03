@@ -15,6 +15,8 @@ import numpy as np
 from gymnasium import spaces
 from pyboy import PyBoy
 
+from pokerl.env.rewards import Reward, RewardV1
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROM = ROOT / "roms" / "pokemon_red.gb"
 DEFAULT_STATE = ROOT / "states" / "post_intro.state"
@@ -40,11 +42,13 @@ class PokemonRedEnv(gym.Env):
         state_path: str | Path = DEFAULT_STATE,
         headless: bool = True,
         max_steps: int = 4096,
+        reward: Reward | None = None,
     ) -> None:
         super().__init__()
         self.rom_path = Path(rom_path)
         self.state_path = Path(state_path)
         self.max_steps = max_steps
+        self.reward_fn: Reward = reward if reward is not None else RewardV1()
 
         if not self.rom_path.exists():
             raise FileNotFoundError(f"ROM not found: {self.rom_path}")
@@ -72,6 +76,7 @@ class PokemonRedEnv(gym.Env):
         with open(self.state_path, "rb") as f:
             self.pyboy.load_state(f)
         self.pyboy.tick()
+        self.reward_fn.reset(self.pyboy.memory)
         self._steps = 0
         return self._obs(), {}
 
@@ -89,7 +94,7 @@ class PokemonRedEnv(gym.Env):
 
         self._steps += 1
         obs = self._obs()
-        reward = 0.0  # placeholder; real reward function lands in rewards.py
+        reward = self.reward_fn.compute(self.pyboy.memory)
         terminated = False
         truncated = self._steps >= self.max_steps
         info: dict[str, Any] = {"step": self._steps}
