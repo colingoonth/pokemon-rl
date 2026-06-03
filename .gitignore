@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+.python-version
+
+# Project artifacts
+runs/
+checkpoints/
+*.pt
+*.ckpt
+
+# Logs
+wandb/
+*.log
+
+# ROM (do NOT commit copyrighted material)
+*.gb
+*.gbc
+*.gba
+roms/
+
+# Save states (derived from ROM)
+*.state
+states/
+
+# Eval outputs (top-level only — `pokerl/eval/` is source code)
+/eval/
+*.mp4
+*.gif
+*.png
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
