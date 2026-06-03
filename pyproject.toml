@@ -10,6 +10,7 @@ dependencies = [
     "torch>=2.1",
     "imageio[ffmpeg]>=2.34",
     "pyyaml>=6.0",
+    "matplotlib>=3.8",
 ]
 
 [dependency-groups]
