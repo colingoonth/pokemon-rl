@@ -16,6 +16,7 @@ mkdir -p "${RUN_DIR}"
 
 cd "/scratch/guenthc1/pokemon-rl"
 export PATH="$HOME/.local/bin:$PATH"
+export PYTHONUNBUFFERED=1   # stream Python prints live to .out
 
 echo "=== Training run ${SLURM_JOB_ID} ==="
 echo "Node:    $(hostname)"

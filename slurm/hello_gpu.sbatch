@@ -18,6 +18,7 @@ cd "/scratch/guenthc1/pokemon-rl"
 
 # Activate uv-managed venv
 export PATH="$HOME/.local/bin:$PATH"
+export PYTHONUNBUFFERED=1
 
 echo "=== ELSA hello-world ==="
 echo "Job id:    ${SLURM_JOB_ID}"
