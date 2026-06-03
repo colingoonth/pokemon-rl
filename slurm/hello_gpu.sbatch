@@ -2,8 +2,8 @@
 #SBATCH --job-name=pokerl-hello
 #SBATCH --output=/scratch/guenthc1/pokemon-rl/runs/hello_%j/hello.out
 #SBATCH --error=/scratch/guenthc1/pokemon-rl/runs/hello_%j/hello.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=l40s
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --time=00:10:00
