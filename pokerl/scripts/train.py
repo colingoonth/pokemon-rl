@@ -11,14 +11,13 @@ from pathlib import Path
 import torch
 
 from pokerl.agent.ppo import PPOConfig, train
-from pokerl.env.pokemon_red_env import PokemonRedEnv
-from pokerl.env.wrappers import FrameStack
+from pokerl.env.make import make_env
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def env_fn():
-    return FrameStack(PokemonRedEnv(headless=True, max_steps=2048), k=4)
+    return make_env(headless=True, max_steps=2048, frame_stack=4)
 
 
 def main() -> None:
