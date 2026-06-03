@@ -18,6 +18,10 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--out", type=Path, default=DEFAULT_STATE,
                    help="Output path for the save state (default: states/post_intro.state).")
+    p.add_argument("--from", dest="from_state", type=Path, default=None,
+                   help="Optional starting save state to load instead of booting "
+                        "the ROM fresh. Useful for capturing battle states starting "
+                        "from post_intro.")
     return p.parse_args()
 
 
@@ -26,6 +30,8 @@ def main() -> None:
     STATE = args.out
     if not ROM.exists():
         raise SystemExit(f"ROM not found at {ROM}")
+    if args.from_state is not None and not args.from_state.exists():
+        raise SystemExit(f"--from state not found: {args.from_state}")
 
     print("Opening Pokemon Red in an SDL2 window.")
     print()
@@ -36,17 +42,26 @@ def main() -> None:
     print("  Enter      = Start")
     print("  Backspace  = Select")
     print()
-    print("Play through the Oak intro:")
-    print("  - Name yourself + your rival")
-    print("  - Pick a starter")
-    print("  - Step outside until you're standing in Pallet Town with the starter")
-    print()
-    print(f"When you're at a good starting state, close the window.")
-    print(f"State will be saved to: {STATE}")
+    if args.from_state is not None:
+        print(f"Starting from: {args.from_state}")
+        print(f"Save to:       {STATE}")
+        print("Close the window when you're at the moment you want to capture.")
+    else:
+        print("Play through the Oak intro:")
+        print("  - Name yourself + your rival")
+        print("  - Pick a starter")
+        print("  - Step outside until you're standing in Pallet Town with the starter")
+        print()
+        print(f"When you're at a good starting state, close the window.")
+        print(f"State will be saved to: {STATE}")
     print()
 
     pyboy = PyBoy(str(ROM), window="SDL2")
     try:
+        if args.from_state is not None:
+            with args.from_state.open("rb") as f:
+                pyboy.load_state(f)
+            pyboy.tick()
         while pyboy.tick():
             pass
         STATE.parent.mkdir(parents=True, exist_ok=True)
