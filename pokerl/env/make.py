@@ -8,11 +8,13 @@ and acts confused).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import gymnasium as gym
+from gymnasium.vector import SyncVectorEnv
 
 from pokerl.env.pokemon_red_env import PokemonRedEnv
-from pokerl.env.rewards import Reward
+from pokerl.env.rewards import Reward, RewardV1
 from pokerl.env.wrappers import FrameStack
 
 
@@ -33,3 +35,33 @@ def make_env(
     if frame_stack > 1:
         env = FrameStack(env, k=frame_stack)
     return env
+
+
+def make_vec_env(
+    n_envs: int,
+    rom_path: str | Path | None = None,
+    state_path: str | Path | None = None,
+    headless: bool = True,
+    max_steps: int = 4096,
+    frame_stack: int = 4,
+    reward_cls: Callable[[], Reward] = RewardV1,
+) -> SyncVectorEnv:
+    """Construct a vectorized env with `n_envs` parallel PokemonRed instances.
+
+    Each env gets its own freshly-constructed Reward instance so per-env
+    exploration sets don't bleed across envs.
+    """
+
+    def _make_one() -> Callable[[], gym.Env]:
+        def thunk() -> gym.Env:
+            return make_env(
+                rom_path=rom_path,
+                state_path=state_path,
+                headless=headless,
+                max_steps=max_steps,
+                frame_stack=frame_stack,
+                reward=reward_cls(),
+            )
+        return thunk
+
+    return SyncVectorEnv([_make_one() for _ in range(n_envs)])

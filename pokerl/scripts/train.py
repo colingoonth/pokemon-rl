@@ -11,21 +11,24 @@ from pathlib import Path
 import torch
 
 from pokerl.agent.ppo import PPOConfig, train
-from pokerl.env.make import make_env
+from pokerl.env.make import make_vec_env
 
 ROOT = Path(__file__).resolve().parents[2]
 
+N_ENVS = 4   # local default; ELSA config will override
+
 
 def env_fn():
-    return make_env(headless=True, max_steps=2048, frame_stack=4)
+    return make_vec_env(n_envs=N_ENVS, headless=True, max_steps=2048, frame_stack=4)
 
 
 def main() -> None:
     out = ROOT / "runs" / "smoke"
     out.mkdir(parents=True, exist_ok=True)
     cfg = PPOConfig(
-        total_timesteps=2048,
-        n_steps=256,
+        total_timesteps=4096,
+        n_envs=N_ENVS,
+        n_steps=128,
         n_epochs=4,
         minibatch_size=64,
         device="cuda" if torch.cuda.is_available() else "cpu",

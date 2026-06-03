@@ -1,10 +1,9 @@
-"""Minimal single-env PPO trainer for PokemonRedEnv.
+"""PPO trainer for PokemonRedEnv (vectorized envs).
 
-Derived from the implementation pattern in CleanRL ppo_atari.py
-(typed out from scratch per clean-room rule, not copied). Single env,
-no vectorization — vectorized envs land when we're ready to push to
-ELSA. Goal here is a small, readable loop that can run for a few
-hundred steps locally and demonstrably update the policy.
+Derived from the CleanRL ppo_atari.py implementation pattern (typed out
+from scratch per clean-room rule, not copied). The env must be a
+gymnasium SyncVectorEnv (or compatible) — n_envs=1 is a valid trivial
+case but the loop is always shaped for parallelism.
 
 References for anyone reading this later:
   - The 9 PPO implementation details that matter:
@@ -14,7 +13,6 @@ References for anyone reading this later:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable
 
 import gymnasium as gym
@@ -22,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from gymnasium.vector import SyncVectorEnv
 from torch.distributions import Categorical
 
 from pokerl.agent.networks import ActorCritic
@@ -31,11 +30,12 @@ from pokerl.infra.logging import CSVLogger
 @dataclass
 class PPOConfig:
     total_timesteps: int = 10_000
-    n_steps: int = 128            # rollout length
-    n_epochs: int = 4             # update epochs per rollout
+    n_envs: int = 1               # vectorized env count
+    n_steps: int = 128            # rollout length per env
+    n_epochs: int = 4
     minibatch_size: int = 64
     learning_rate: float = 2.5e-4
-    gamma: float = 0.999          # high — Pokemon is long-horizon
+    gamma: float = 0.999
     gae_lambda: float = 0.95
     clip_coef: float = 0.1
     value_coef: float = 0.5
@@ -44,12 +44,14 @@ class PPOConfig:
     anneal_lr: bool = True
     seed: int = 0
     device: str = "cpu"
-    log_every: int = 1            # iterations between log prints
-    log_csv: str | None = None    # optional path to a per-iteration CSV log
+    log_every: int = 1
+    log_csv: str | None = None
 
 
 @dataclass
 class RolloutBuffer:
+    """Per-iteration storage. Shapes are (n_steps, n_envs, ...)."""
+
     obs: torch.Tensor
     actions: torch.Tensor
     log_probs: torch.Tensor
@@ -60,65 +62,79 @@ class RolloutBuffer:
     returns: torch.Tensor = field(init=False)
 
     @classmethod
-    def empty(cls, n_steps: int, obs_shape: tuple[int, ...], device: str) -> "RolloutBuffer":
+    def empty(
+        cls,
+        n_steps: int,
+        n_envs: int,
+        obs_shape: tuple[int, ...],
+        device: str,
+    ) -> "RolloutBuffer":
         return cls(
-            obs=torch.zeros((n_steps, *obs_shape), dtype=torch.uint8, device=device),
-            actions=torch.zeros(n_steps, dtype=torch.long, device=device),
-            log_probs=torch.zeros(n_steps, dtype=torch.float32, device=device),
-            values=torch.zeros(n_steps, dtype=torch.float32, device=device),
-            rewards=torch.zeros(n_steps, dtype=torch.float32, device=device),
-            dones=torch.zeros(n_steps, dtype=torch.float32, device=device),
+            obs=torch.zeros((n_steps, n_envs, *obs_shape), dtype=torch.uint8, device=device),
+            actions=torch.zeros((n_steps, n_envs), dtype=torch.long, device=device),
+            log_probs=torch.zeros((n_steps, n_envs), dtype=torch.float32, device=device),
+            values=torch.zeros((n_steps, n_envs), dtype=torch.float32, device=device),
+            rewards=torch.zeros((n_steps, n_envs), dtype=torch.float32, device=device),
+            dones=torch.zeros((n_steps, n_envs), dtype=torch.float32, device=device),
         )
 
     def compute_gae(
-        self, last_value: float, last_done: float, gamma: float, gae_lambda: float
+        self,
+        last_values: torch.Tensor,
+        last_dones: torch.Tensor,
+        gamma: float,
+        gae_lambda: float,
     ) -> None:
-        """Compute advantages with Generalized Advantage Estimation."""
-        n = self.rewards.shape[0]
+        """Compute per-env GAE advantages + returns."""
+        n_steps = self.rewards.shape[0]
         advantages = torch.zeros_like(self.rewards)
-        gae = 0.0
-        for t in reversed(range(n)):
-            if t == n - 1:
-                next_nonterminal = 1.0 - last_done
-                next_value = last_value
+        gae = torch.zeros_like(last_values)
+        for t in reversed(range(n_steps)):
+            if t == n_steps - 1:
+                next_nonterminal = 1.0 - last_dones
+                next_values = last_values
             else:
-                next_nonterminal = 1.0 - self.dones[t + 1].item()
-                next_value = self.values[t + 1].item()
-            delta = (
-                self.rewards[t].item()
-                + gamma * next_value * next_nonterminal
-                - self.values[t].item()
-            )
+                next_nonterminal = 1.0 - self.dones[t + 1]
+                next_values = self.values[t + 1]
+            delta = self.rewards[t] + gamma * next_values * next_nonterminal - self.values[t]
             gae = delta + gamma * gae_lambda * next_nonterminal * gae
             advantages[t] = gae
         self.advantages = advantages
         self.returns = advantages + self.values
 
 
-def train(env_fn: Callable[[], gym.Env], cfg: PPOConfig) -> ActorCritic:
-    """Run PPO on a single env. Returns the trained network."""
+def train(env_fn: Callable[[], SyncVectorEnv], cfg: PPOConfig) -> ActorCritic:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    env = env_fn()
-    obs_shape = env.observation_space.shape
-    assert isinstance(env.action_space, gym.spaces.Discrete)
-    n_actions = int(env.action_space.n)
+    envs = env_fn()
+    assert isinstance(envs.single_action_space, gym.spaces.Discrete)
+    n_envs = envs.num_envs
+    assert n_envs == cfg.n_envs, (
+        f"env_fn produced {n_envs} envs but PPOConfig.n_envs={cfg.n_envs}"
+    )
+    obs_shape: tuple[int, ...] = tuple(envs.single_observation_space.shape)
+    n_actions = int(envs.single_action_space.n)
 
     device = torch.device(cfg.device)
     net = ActorCritic(obs_shape, n_actions=n_actions).to(device)
     optimizer = optim.Adam(net.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
-    obs_np, _ = env.reset(seed=cfg.seed)
+    obs_np, _ = envs.reset(seed=cfg.seed)
     obs_t = torch.from_numpy(obs_np).to(device)
-    done = False
-    global_step = 0
-    n_iterations = max(1, cfg.total_timesteps // cfg.n_steps)
+    dones_t = torch.zeros(n_envs, dtype=torch.float32, device=device)
 
-    ep_return = 0.0
-    ep_len = 0
-    episode_returns: list[float] = []
-    episode_lengths: list[int] = []
+    batch_size = cfg.n_steps * n_envs
+    assert batch_size % cfg.minibatch_size == 0, (
+        f"batch_size {batch_size} not divisible by minibatch_size {cfg.minibatch_size}"
+    )
+
+    n_iterations = max(1, cfg.total_timesteps // batch_size)
+    global_step = 0
+
+    ep_returns_running = np.zeros(n_envs, dtype=np.float64)
+    ep_lengths_running = np.zeros(n_envs, dtype=np.int64)
+    finished_returns: list[float] = []
 
     csv_logger = CSVLogger(cfg.log_csv) if cfg.log_csv else None
 
@@ -128,71 +144,71 @@ def train(env_fn: Callable[[], gym.Env], cfg: PPOConfig) -> ActorCritic:
             for g in optimizer.param_groups:
                 g["lr"] = frac * cfg.learning_rate
 
-        buf = RolloutBuffer.empty(cfg.n_steps, obs_shape, cfg.device)
+        buf = RolloutBuffer.empty(cfg.n_steps, n_envs, obs_shape, cfg.device)
 
         for step in range(cfg.n_steps):
-            global_step += 1
+            global_step += n_envs
             buf.obs[step] = obs_t
-            buf.dones[step] = float(done)
+            buf.dones[step] = dones_t
 
             with torch.no_grad():
-                logits, value = net(obs_t.unsqueeze(0))
+                logits, values = net(obs_t)
             dist = Categorical(logits=logits)
-            action = dist.sample()
-            log_prob = dist.log_prob(action)
+            actions = dist.sample()
+            log_probs = dist.log_prob(actions)
 
-            buf.values[step] = value.squeeze(0)
-            buf.actions[step] = action.squeeze(0)
-            buf.log_probs[step] = log_prob.squeeze(0)
+            buf.values[step] = values
+            buf.actions[step] = actions
+            buf.log_probs[step] = log_probs
 
-            obs_np, reward, term, trunc, _ = env.step(int(action.item()))
-            done = bool(term or trunc)
-            buf.rewards[step] = float(reward)
+            actions_np = actions.cpu().numpy()
+            obs_np, rewards_np, term_np, trunc_np, _ = envs.step(actions_np)
+            done_np = np.logical_or(term_np, trunc_np)
 
-            ep_return += float(reward)
-            ep_len += 1
+            buf.rewards[step] = torch.from_numpy(rewards_np).to(device).float()
 
-            if done:
-                episode_returns.append(ep_return)
-                episode_lengths.append(ep_len)
-                ep_return = 0.0
-                ep_len = 0
-                obs_np, _ = env.reset()
+            ep_returns_running += rewards_np
+            ep_lengths_running += 1
+            for i, d in enumerate(done_np):
+                if d:
+                    finished_returns.append(float(ep_returns_running[i]))
+                    ep_returns_running[i] = 0.0
+                    ep_lengths_running[i] = 0
 
             obs_t = torch.from_numpy(obs_np).to(device)
+            dones_t = torch.from_numpy(done_np).to(device).float()
 
-        # Bootstrap value of the final state
         with torch.no_grad():
-            _, last_value_t = net(obs_t.unsqueeze(0))
+            _, last_values_t = net(obs_t)
+
         buf.compute_gae(
-            last_value=float(last_value_t.item()),
-            last_done=float(done),
+            last_values=last_values_t,
+            last_dones=dones_t,
             gamma=cfg.gamma,
             gae_lambda=cfg.gae_lambda,
         )
 
-        # PPO update epochs
-        flat_obs = buf.obs
-        flat_actions = buf.actions
-        flat_log_probs = buf.log_probs
-        flat_advantages = buf.advantages
-        flat_returns = buf.returns
-        flat_values = buf.values
+        # Flatten (n_steps, n_envs, ...) -> (batch_size, ...)
+        b_obs = buf.obs.reshape((batch_size, *obs_shape))
+        b_actions = buf.actions.reshape(batch_size)
+        b_log_probs = buf.log_probs.reshape(batch_size)
+        b_advantages = buf.advantages.reshape(batch_size)
+        b_returns = buf.returns.reshape(batch_size)
+        b_values = buf.values.reshape(batch_size)
 
-        indices = np.arange(cfg.n_steps)
+        indices = np.arange(batch_size)
         last_pg_loss = last_v_loss = last_entropy = 0.0
         for _ in range(cfg.n_epochs):
             np.random.shuffle(indices)
-            for start in range(0, cfg.n_steps, cfg.minibatch_size):
+            for start in range(0, batch_size, cfg.minibatch_size):
                 mb_idx = indices[start : start + cfg.minibatch_size]
-                mb_obs = flat_obs[mb_idx]
-                mb_actions = flat_actions[mb_idx]
-                mb_old_log_probs = flat_log_probs[mb_idx]
-                mb_adv = flat_advantages[mb_idx]
-                mb_returns = flat_returns[mb_idx]
-                mb_values_old = flat_values[mb_idx]
+                mb_obs = b_obs[mb_idx]
+                mb_actions = b_actions[mb_idx]
+                mb_old_log_probs = b_log_probs[mb_idx]
+                mb_adv = b_advantages[mb_idx]
+                mb_returns = b_returns[mb_idx]
+                mb_values_old = b_values[mb_idx]
 
-                # Normalize advantages within the minibatch (PPO best practice)
                 mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
                 logits, values_new = net(mb_obs)
@@ -205,7 +221,6 @@ def train(env_fn: Callable[[], gym.Env], cfg: PPOConfig) -> ActorCritic:
                 surr2 = ratio.clamp(1 - cfg.clip_coef, 1 + cfg.clip_coef) * mb_adv
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Clipped value loss
                 v_clipped = mb_values_old + (values_new - mb_values_old).clamp(
                     -cfg.clip_coef, cfg.clip_coef
                 )
@@ -224,31 +239,34 @@ def train(env_fn: Callable[[], gym.Env], cfg: PPOConfig) -> ActorCritic:
                 last_v_loss = float(value_loss.item())
                 last_entropy = float(entropy.item())
 
-        recent = episode_returns[-10:] if episode_returns else [ep_return]
+        recent = finished_returns[-20:] if finished_returns else [float(ep_returns_running.mean())]
         mean_ret = float(np.mean(recent))
-        episode_count = len(episode_returns)
-        unique_tiles = getattr(env.unwrapped, "reward_fn", None)
-        tiles_visited = (
-            unique_tiles.unique_tiles_visited if unique_tiles is not None else 0
-        )
+        episode_count = len(finished_returns)
+
+        # Pull aggregate exploration stats across all envs
+        unique_tiles_total = 0
+        for sub_env in getattr(envs, "envs", []):
+            rf = getattr(sub_env.unwrapped, "reward_fn", None)
+            if rf is not None and hasattr(rf, "unique_tiles_visited"):
+                unique_tiles_total += rf.unique_tiles_visited
 
         if iteration % cfg.log_every == 0:
             print(
-                f"iter {iteration:4d}  step {global_step:6d}  "
-                f"mean_return(last10) {mean_ret:+.3f}  "
+                f"iter {iteration:4d}  step {global_step:7d}  "
+                f"mean_return(last20) {mean_ret:+.3f}  "
                 f"episodes {episode_count:4d}  "
-                f"tiles {tiles_visited:5d}  "
-                f"policy_loss {last_pg_loss:+.4f}  "
-                f"value_loss {last_v_loss:.4f}  "
-                f"entropy {last_entropy:.3f}"
+                f"tiles(all_envs) {unique_tiles_total:5d}  "
+                f"pg_loss {last_pg_loss:+.4f}  "
+                f"v_loss {last_v_loss:.4f}  "
+                f"H {last_entropy:.3f}"
             )
         if csv_logger is not None:
             csv_logger.log({
                 "iteration": iteration,
                 "global_step": global_step,
-                "mean_return_last10": mean_ret,
+                "mean_return_last20": mean_ret,
                 "episodes_completed": episode_count,
-                "unique_tiles_visited": tiles_visited,
+                "unique_tiles_total": unique_tiles_total,
                 "policy_loss": last_pg_loss,
                 "value_loss": last_v_loss,
                 "entropy": last_entropy,
@@ -257,5 +275,5 @@ def train(env_fn: Callable[[], gym.Env], cfg: PPOConfig) -> ActorCritic:
 
     if csv_logger is not None:
         csv_logger.close()
-    env.close()
+    envs.close()
     return net
