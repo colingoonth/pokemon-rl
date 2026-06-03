@@ -14,6 +14,7 @@ References for anyone reading this later:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 import gymnasium as gym
@@ -24,6 +25,7 @@ import torch.optim as optim
 from torch.distributions import Categorical
 
 from pokerl.agent.networks import ActorCritic
+from pokerl.infra.logging import CSVLogger
 
 
 @dataclass
@@ -43,6 +45,7 @@ class PPOConfig:
     seed: int = 0
     device: str = "cpu"
     log_every: int = 1            # iterations between log prints
+    log_csv: str | None = None    # optional path to a per-iteration CSV log
 
 
 @dataclass
@@ -116,6 +119,8 @@ def train(env_fn: Callable[[], gym.Env], cfg: PPOConfig) -> ActorCritic:
     ep_len = 0
     episode_returns: list[float] = []
     episode_lengths: list[int] = []
+
+    csv_logger = CSVLogger(cfg.log_csv) if cfg.log_csv else None
 
     for iteration in range(1, n_iterations + 1):
         if cfg.anneal_lr:
@@ -219,16 +224,38 @@ def train(env_fn: Callable[[], gym.Env], cfg: PPOConfig) -> ActorCritic:
                 last_v_loss = float(value_loss.item())
                 last_entropy = float(entropy.item())
 
+        recent = episode_returns[-10:] if episode_returns else [ep_return]
+        mean_ret = float(np.mean(recent))
+        episode_count = len(episode_returns)
+        unique_tiles = getattr(env.unwrapped, "reward_fn", None)
+        tiles_visited = (
+            unique_tiles.unique_tiles_visited if unique_tiles is not None else 0
+        )
+
         if iteration % cfg.log_every == 0:
-            recent = episode_returns[-10:] if episode_returns else [ep_return]
-            mean_ret = float(np.mean(recent))
             print(
                 f"iter {iteration:4d}  step {global_step:6d}  "
                 f"mean_return(last10) {mean_ret:+.3f}  "
+                f"episodes {episode_count:4d}  "
+                f"tiles {tiles_visited:5d}  "
                 f"policy_loss {last_pg_loss:+.4f}  "
                 f"value_loss {last_v_loss:.4f}  "
                 f"entropy {last_entropy:.3f}"
             )
+        if csv_logger is not None:
+            csv_logger.log({
+                "iteration": iteration,
+                "global_step": global_step,
+                "mean_return_last10": mean_ret,
+                "episodes_completed": episode_count,
+                "unique_tiles_visited": tiles_visited,
+                "policy_loss": last_pg_loss,
+                "value_loss": last_v_loss,
+                "entropy": last_entropy,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+            })
 
+    if csv_logger is not None:
+        csv_logger.close()
     env.close()
     return net

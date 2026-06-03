@@ -21,19 +21,23 @@ def env_fn():
 
 
 def main() -> None:
+    out = ROOT / "runs" / "smoke"
+    out.mkdir(parents=True, exist_ok=True)
     cfg = PPOConfig(
         total_timesteps=2048,
         n_steps=256,
         n_epochs=4,
         minibatch_size=64,
         device="cuda" if torch.cuda.is_available() else "cpu",
+        log_csv=str(out / "metrics.csv"),
     )
     print(f"PPO config: {cfg}")
     net = train(env_fn, cfg)
-    out = ROOT / "checkpoints"
-    out.mkdir(parents=True, exist_ok=True)
-    torch.save(net.state_dict(), out / "smoke.pt")
-    print(f"Saved checkpoint -> {out / 'smoke.pt'}")
+    ckpt_dir = ROOT / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(net.state_dict(), ckpt_dir / "smoke.pt")
+    print(f"Saved checkpoint -> {ckpt_dir / 'smoke.pt'}")
+    print(f"Metrics CSV     -> {out / 'metrics.csv'}")
 
 
 if __name__ == "__main__":
