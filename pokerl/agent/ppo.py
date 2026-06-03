@@ -13,6 +13,7 @@ References for anyone reading this later:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 import gymnasium as gym
@@ -47,6 +48,7 @@ class PPOConfig:
     log_every: int = 1
     log_csv: str | None = None
     async_envs: bool = False      # multi-process envs to escape the GIL
+    save_every: int = 100         # iterations between intermediate checkpoints; 0 disables
 
 
 @dataclass
@@ -138,6 +140,13 @@ def train(env_fn: Callable[[], VectorEnv], cfg: PPOConfig) -> ActorCritic:
     finished_returns: list[float] = []
 
     csv_logger = CSVLogger(cfg.log_csv) if cfg.log_csv else None
+
+    # Checkpoint dir is colocated with the metrics CSV (so the train script's
+    # run_dir choice is the single source of truth for run artifacts).
+    ckpt_dir: Path | None = None
+    if cfg.save_every > 0 and cfg.log_csv:
+        ckpt_dir = Path(cfg.log_csv).parent / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for iteration in range(1, n_iterations + 1):
         if cfg.anneal_lr:
@@ -274,6 +283,11 @@ def train(env_fn: Callable[[], VectorEnv], cfg: PPOConfig) -> ActorCritic:
                 "entropy": last_entropy,
                 "learning_rate": optimizer.param_groups[0]["lr"],
             })
+
+        if ckpt_dir is not None and iteration % cfg.save_every == 0:
+            path = ckpt_dir / f"iter_{iteration:06d}.pt"
+            torch.save(net.state_dict(), path)
+            print(f"  -> saved checkpoint {path}")
 
     if csv_logger is not None:
         csv_logger.close()
