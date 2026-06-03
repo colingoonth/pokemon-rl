@@ -24,7 +24,7 @@ echo "Workdir: $(pwd)"
 echo "Outputs: ${RUN_DIR}"
 echo
 
-# Config-driven run. Override checkpoint dir to land in the run-specific path.
-uv run python -m pokerl.scripts.train
+# Config-driven run.
+uv run python -m pokerl.scripts.train --config configs/elsa_brock.yaml
 
 echo "=== Done $(date) ==="

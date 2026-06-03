@@ -1,46 +1,63 @@
 """PPO training entry point.
 
-Single env, small budget, runs locally. This is the "does the loop
-actually train?" smoke test. Real runs go to ELSA with vectorized envs
-and a multi-hundred-million-step budget.
+Usage:
+  uv run python -m pokerl.scripts.train --config configs/dev_local.yaml
+  uv run python -m pokerl.scripts.train --config configs/elsa_brock.yaml
+
+Run artifacts (csv log, checkpoint) land in runs/<run_name>/.
 """
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import torch
 
-from pokerl.agent.ppo import PPOConfig, train
+from pokerl.agent.ppo import train
 from pokerl.env.make import make_vec_env
+from pokerl.infra.config import load_ppo_config
 
 ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = ROOT / "configs" / "dev_local.yaml"
 
-N_ENVS = 4   # local default; ELSA config will override
 
-
-def env_fn():
-    return make_vec_env(n_envs=N_ENVS, headless=True, max_steps=2048, frame_stack=4)
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p.add_argument("--device", default=None,
+                   help="Override device (cpu / cuda). Default: auto.")
+    return p.parse_args()
 
 
 def main() -> None:
-    out = ROOT / "runs" / "smoke"
-    out.mkdir(parents=True, exist_ok=True)
-    cfg = PPOConfig(
-        total_timesteps=4096,
-        n_envs=N_ENVS,
-        n_steps=128,
-        n_epochs=4,
-        minibatch_size=64,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        log_csv=str(out / "metrics.csv"),
-    )
-    print(f"PPO config: {cfg}")
+    args = parse_args()
+    if args.device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+
+    out_root = ROOT / "runs"
+    cfg, run_name = load_ppo_config(args.config, device=device)
+    run_dir = out_root / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cfg.log_csv = str(run_dir / "metrics.csv")
+
+    print(f"Config: {args.config}")
+    print(f"Run:    {run_name}")
+    print(f"Device: {device}")
+    print(f"PPO:    {cfg}")
+
+    def env_fn():
+        return make_vec_env(
+            n_envs=cfg.n_envs,
+            headless=True,
+            max_steps=4096,
+            frame_stack=4,
+        )
+
     net = train(env_fn, cfg)
-    ckpt_dir = ROOT / "checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(net.state_dict(), ckpt_dir / "smoke.pt")
-    print(f"Saved checkpoint -> {ckpt_dir / 'smoke.pt'}")
-    print(f"Metrics CSV     -> {out / 'metrics.csv'}")
+    torch.save(net.state_dict(), run_dir / "final.pt")
+    print(f"Saved final checkpoint -> {run_dir / 'final.pt'}")
 
 
 if __name__ == "__main__":
