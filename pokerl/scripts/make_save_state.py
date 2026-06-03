@@ -19,10 +19,10 @@ def main() -> None:
 
     print("Opening Pokemon Red in an SDL2 window.")
     print()
-    print("Controls:")
+    print("Controls (PyBoy default keymap):")
     print("  Arrow keys = D-pad")
-    print("  Z          = A button")
-    print("  X          = B button")
+    print("  A          = A button")
+    print("  S          = B button")
     print("  Enter      = Start")
     print("  Backspace  = Select")
     print()
