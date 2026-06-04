@@ -480,3 +480,93 @@ def test_v24_faint_penalty_actually_fires_at_overridden_magnitude():
         assert abs(got - expected) < 1e-9, (
             f"{cls.__name__}: got {got}, expected {expected}"
         )
+
+
+# ---------- RewardV0_2_5 family (building / mart bonuses) ----------
+
+from pokerl.env.rewards import (
+    RewardV0_2_5_b20,
+    RewardV0_2_5_b50,
+    RewardV0_2_5_b100,
+)
+
+
+def test_v25_magnitudes():
+    assert RewardV0_2_5_b20.NEW_MAP_REWARD == 20.0
+    assert RewardV0_2_5_b50.NEW_MAP_REWARD == 50.0
+    assert RewardV0_2_5_b100.NEW_MAP_REWARD == 100.0
+    # Inherits other constants from V0.2.5 -> V0.2.4_f25 -> V0.2.3
+    assert RewardV0_2_5_b20.FAINT_PENALTY == -25.0
+    assert RewardV0_2_5_b20.MART_PC_BONUS == 20.0
+    assert RewardV0_2_5_b20.PC_HEAL_LOW == 5.0
+
+
+def test_v25_pokemart_first_visit_stacks():
+    """First-time entry into a Pokemart pays NEW_MAP + MART_PC_BONUS."""
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_5_b20()
+    r.reset(mem)
+
+    # Walk into Viridian Mart
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_MART
+    got = r.compute(mem)
+    expected = (
+        r.STEP_PENALTY
+        + r.EXPLORE_REWARD          # new (map, x, y) tile
+        + r.NEW_MAP_REWARD          # +20
+        + r.MART_PC_BONUS           # +20
+    )
+    assert abs(got - expected) < 1e-9
+
+
+def test_v25_pokecenter_first_visit_triple_stacks():
+    """First PC entry stacks NEW_MAP + MART_PC_BONUS + PC_FIRST_VISIT."""
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_5_b50()
+    r.reset(mem)
+
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_POKECENTER
+    got = r.compute(mem)
+    expected = (
+        r.STEP_PENALTY
+        + r.EXPLORE_REWARD
+        + r.NEW_MAP_REWARD          # +50
+        + r.MART_PC_BONUS           # +20
+        + r.PC_FIRST_VISIT          # +5
+    )
+    assert abs(got - expected) < 1e-9
+
+
+def test_v25_non_special_building_only_new_map():
+    """Entering a building that's NOT a Mart/PC pays only NEW_MAP_REWARD."""
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_5_b100()
+    r.reset(mem)
+
+    # Oak's Lab is a building but not a Mart or PC
+    state[rm.ADDR_MAP_ID] = rm.MAP_OAKS_LAB
+    got = r.compute(mem)
+    expected = r.STEP_PENALTY + r.EXPLORE_REWARD + r.NEW_MAP_REWARD  # +100
+    assert abs(got - expected) < 1e-9
+
+
+def test_v25_pc_heal_low_bumped_to_5():
+    """V0.2.5 raises PC_HEAL_LOW to 5.0 (was 2.0 in V0.2.3)."""
+    state = base_state(map_id=rm.MAP_VIRIDIAN_POKECENTER)
+    _set_party_hp(state, 0, 5, 22)  # 22% HP, low
+    mem = FakeMem(state)
+    r = RewardV0_2_5_b20()
+    r.reset(mem)
+    r.compute(mem)  # baseline at low HP
+    _set_party_hp(state, 0, 22, 22)  # heal to full
+    got = r.compute(mem)
+    # PC was pre-seeded into _visited_pokecenters at reset, so no PC_FIRST_VISIT
+    # No new map_id since we started here.
+    assert abs(got - (r.STEP_PENALTY + r.PC_HEAL_LOW)) < 1e-9
+    assert r.PC_HEAL_LOW == 5.0

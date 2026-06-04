@@ -569,6 +569,67 @@ class RewardV0_2_4_f100(RewardV0_2_3):
     FAINT_PENALTY = -100.0
 
 
+class RewardV0_2_5(RewardV0_2_4_f25):
+    """V0.2.4_f25 + aggressive building / Pokemart / PokeCenter bonuses.
+
+    Watching V0.2.4_f25 (the one variant whose agent actually engages in
+    battles) showed the policy refuses to enter buildings or interact
+    with NPCs in the overworld. It learned A-press = wasted ticks. For
+    V1 (Brock), the agent MUST enter Brock's Gym (a building map_id).
+
+    V0.2.5 makes building entry strongly rewarding:
+      NEW_MAP_REWARD     overridden by subclasses (sweep magnitudes)
+      MART_PC_BONUS      +20 extra when the new map is a Pokemart or PC
+      PC_HEAL_LOW        bumped to +5 (was +2) — heal incentive matches
+                         the bigger map exploration scale
+
+    Dialog detection (rewarding NPC interactions specifically) is
+    deferred to V0.2.6 pending verification of the right text-box-active
+    RAM byte — that wasn't ready in time for tonight's sweep.
+
+    Inherits everything else from V0.2.4_f25: FAINT_PENALTY -25, PC heal
+    logic, blackout guard, flee penalty, battle rewards.
+    """
+
+    MART_PC_BONUS = 20.0
+    PC_HEAL_LOW = 5.0  # was 2.0 in V0.2.3
+
+    def compute(self, mem: MemoryView) -> float:
+        # Snapshot BEFORE super updates _visited_maps so we can detect
+        # the "this step entered a Mart/PC for the first time" event.
+        current_map = rm.map_id(mem)
+        is_new_map = current_map not in self._visited_maps
+        is_mart_or_pc = (
+            current_map in rm.POKECENTER_MAP_IDS
+            or current_map in rm.POKEMART_MAP_IDS
+        )
+
+        reward = super().compute(mem)
+
+        if is_new_map and is_mart_or_pc:
+            reward += self.MART_PC_BONUS
+
+        return reward
+
+
+class RewardV0_2_5_b20(RewardV0_2_5):
+    """V0.2.5 with NEW_MAP_REWARD = +20. First Mart/PC visit = +40 stacked."""
+
+    NEW_MAP_REWARD = 20.0
+
+
+class RewardV0_2_5_b50(RewardV0_2_5):
+    """V0.2.5 with NEW_MAP_REWARD = +50. First Mart/PC visit = +70 stacked."""
+
+    NEW_MAP_REWARD = 50.0
+
+
+class RewardV0_2_5_b100(RewardV0_2_5):
+    """V0.2.5 with NEW_MAP_REWARD = +100. First Mart/PC visit = +120 stacked."""
+
+    NEW_MAP_REWARD = 100.0
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
@@ -578,6 +639,9 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_2_4_f25": RewardV0_2_4_f25,
     "RewardV0_2_4_f50": RewardV0_2_4_f50,
     "RewardV0_2_4_f100": RewardV0_2_4_f100,
+    "RewardV0_2_5_b20": RewardV0_2_5_b20,
+    "RewardV0_2_5_b50": RewardV0_2_5_b50,
+    "RewardV0_2_5_b100": RewardV0_2_5_b100,
 }
 
 

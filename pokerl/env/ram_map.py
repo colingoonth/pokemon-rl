@@ -92,6 +92,30 @@ POKECENTER_MAP_IDS: frozenset[int] = frozenset({
     MAP_SAFFRON_POKECENTER,
 })
 
+# Pokemart map ids (pret/pokered). Viridian + Pewter are V1-critical.
+# Celadon Dept Store is a multi-floor megamart with different map_ids per
+# floor — included primary lobby only; sub-floors will register as their
+# own new map_ids and pay the base NEW_MAP_REWARD without the mart bonus.
+MAP_VIRIDIAN_MART  = 0x2A
+MAP_PEWTER_MART    = 0x3B
+MAP_CERULEAN_MART  = 0x41
+MAP_VERMILION_MART = 0x5A
+MAP_LAVENDER_MART  = 0x8E
+MAP_FUCHSIA_MART   = 0x9B
+MAP_CINNABAR_MART  = 0xAC
+MAP_SAFFRON_MART   = 0xB7
+
+POKEMART_MAP_IDS: frozenset[int] = frozenset({
+    MAP_VIRIDIAN_MART,
+    MAP_PEWTER_MART,
+    MAP_CERULEAN_MART,
+    MAP_VERMILION_MART,
+    MAP_LAVENDER_MART,
+    MAP_FUCHSIA_MART,
+    MAP_CINNABAR_MART,
+    MAP_SAFFRON_MART,
+})
+
 
 # --- Readers ---
 
