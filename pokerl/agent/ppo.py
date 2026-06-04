@@ -12,6 +12,7 @@ References for anyone reading this later:
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -158,6 +159,7 @@ def train(
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for iteration in range(1, n_iterations + 1):
+        iter_t0 = time.perf_counter()
         if cfg.anneal_lr:
             frac = 1.0 - (iteration - 1) / n_iterations
             for g in optimizer.param_groups:
@@ -270,6 +272,9 @@ def train(
         except Exception:
             unique_tiles_total = 0
 
+        iter_dt = time.perf_counter() - iter_t0
+        sps = (cfg.n_steps * n_envs) / iter_dt if iter_dt > 0 else 0.0
+
         if iteration % cfg.log_every == 0:
             print(
                 f"iter {iteration:4d}  step {global_step:7d}  "
@@ -278,7 +283,9 @@ def train(
                 f"tiles(all_envs) {unique_tiles_total:5d}  "
                 f"pg_loss {last_pg_loss:+.4f}  "
                 f"v_loss {last_v_loss:.4f}  "
-                f"H {last_entropy:.3f}"
+                f"H {last_entropy:.3f}  "
+                f"dt {iter_dt:.2f}s  "
+                f"sps {sps:.0f}"
             )
         if csv_logger is not None:
             csv_logger.log({
@@ -291,6 +298,8 @@ def train(
                 "value_loss": last_v_loss,
                 "entropy": last_entropy,
                 "learning_rate": optimizer.param_groups[0]["lr"],
+                "iter_seconds": iter_dt,
+                "samples_per_second": sps,
             })
 
         if ckpt_dir is not None and iteration % cfg.save_every == 0:
