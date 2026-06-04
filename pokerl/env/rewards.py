@@ -270,10 +270,175 @@ class RewardV0_2_1(RewardV0_2):
     MOVE_BONUS = 0.05      # was 0.2
 
 
+class RewardV0_2_2(RewardV0_2_1):
+    """V0.2.1 + fix flee-as-win exploit + new-map / catch rewards.
+
+    V0.2.1 had a bug: WIN_BATTLE fired any time in_battle went from
+    nonzero -> 0 with the party alive, which included fleeing. The
+    agent learned to walk into grass, encounter, flee, repeat — earning
+    +10 per flee. Visible in watch.py: agent entered Rattata battle,
+    fled immediately, repeated.
+
+    V0.2.2 fixes that by tracking enemy_killed_this_battle and
+    pokemon_caught_this_battle during the battle, then only awarding
+    WIN_BATTLE when one of those flags is set. Fleeing now pays
+    FLEE_PENALTY (-1) — small enough that strategic fleeing (low HP,
+    overmatched) is still cheaper than -7 lose + faint penalties, but
+    expensive enough that grind-flee is unprofitable.
+
+    Two new positive signals to pull the agent out of "grind battles
+    forever" once it converges on combat:
+      NEW_MAP_REWARD (+5)        when entering a previously-unseen map_id
+      CATCH_REWARD (+5)          per Pokemon caught (party_count++)
+      NEW_CATCH_BONUS (+20)      additional bonus when the caught species
+                                 is new to the per-episode caught set
+    """
+
+    BEAT_MON_REWARD = 10.0       # was +2 in V0.2 — bumped: this IS the wild-win reward
+    TRAINER_WIN_BONUS = 20.0     # bonus for clearing a trainer battle (on top of per-kill)
+    FLEE_PENALTY = -1.0
+    NEW_MAP_REWARD = 5.0
+    CATCH_REWARD = 5.0
+    NEW_CATCH_BONUS = 20.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._enemy_killed_this_battle = False
+        self._pokemon_caught_this_battle = False
+        self._battle_was_trainer = False
+        self._last_party_count = 0
+        self._visited_maps: set[int] = set()
+        self._caught_species: set[int] = set()
+
+    def reset(self, mem: MemoryView) -> None:
+        super().reset(mem)
+        self._enemy_killed_this_battle = False
+        self._pokemon_caught_this_battle = False
+        self._battle_was_trainer = False
+        self._last_party_count = rm.party_count(mem)
+        self._visited_maps = {rm.map_id(mem)}
+        self._caught_species = set()
+
+    def compute(self, mem: MemoryView) -> float:
+        reward = self.STEP_PENALTY
+
+        # ----- Movement / exploration -----
+        in_battle_now = rm.in_battle(mem)
+        if in_battle_now == 0:
+            x, y = rm.player_position(mem)
+            position = (rm.map_id(mem), x, y)
+            if self._last_position is not None and position != self._last_position:
+                if position in self._visited:
+                    reward += self.MOVE_BONUS
+                else:
+                    reward += self.EXPLORE_REWARD
+                    self._visited.add(position)
+            self._last_position = position
+
+        # ----- New map_id -----
+        current_map = rm.map_id(mem)
+        if current_map not in self._visited_maps:
+            self._visited_maps.add(current_map)
+            reward += self.NEW_MAP_REWARD
+
+        # ----- Battle transitions -----
+        battle_started = self._last_in_battle == 0 and in_battle_now != 0
+        battle_ended = self._last_in_battle != 0 and in_battle_now == 0
+
+        party_hp = [cur for cur, _mx in rm.party_hp(mem)]
+        party_count_now = rm.party_count(mem)
+
+        if battle_started:
+            self._enemy_killed_this_battle = False
+            self._pokemon_caught_this_battle = False
+            self._battle_was_trainer = (in_battle_now == 2)
+            if in_battle_now == 1:
+                species = rm.enemy_mon_species(mem)
+                if species not in self._encountered_species:
+                    self._encountered_species.add(species)
+                    reward += self.NEW_ENCOUNTER
+            elif in_battle_now == 2:
+                tid = rm.trainer_id(mem)
+                if tid not in self._encountered_trainers:
+                    self._encountered_trainers.add(tid)
+                    reward += self.NEW_ENCOUNTER
+
+        if in_battle_now != 0 and self._last_in_battle != 0:
+            enemy_hp_now = rm.enemy_mon_hp(mem)
+            if self._last_enemy_hp > 0 and enemy_hp_now == 0:
+                reward += self.BEAT_MON_REWARD
+                self._enemy_killed_this_battle = True
+            self._last_enemy_hp = enemy_hp_now
+            if party_count_now > self._last_party_count:
+                self._pokemon_caught_this_battle = True
+        elif in_battle_now != 0 and battle_started:
+            self._last_enemy_hp = rm.enemy_mon_hp(mem)
+            if party_count_now > self._last_party_count:
+                self._pokemon_caught_this_battle = True
+        elif in_battle_now == 0:
+            self._last_enemy_hp = 0
+
+        # ----- Catch rewards (any time party_count increases) -----
+        if party_count_now > self._last_party_count:
+            n_new = party_count_now - self._last_party_count
+            reward += self.CATCH_REWARD * n_new
+            party_species = rm.party_species(mem)
+            for slot in range(self._last_party_count, party_count_now):
+                if slot < len(party_species):
+                    species_id = party_species[slot]
+                    if species_id not in self._caught_species:
+                        self._caught_species.add(species_id)
+                        reward += self.NEW_CATCH_BONUS
+        self._last_party_count = party_count_now
+
+        # ----- Battle-end resolution -----
+        # Wild kills are paid per-mon via BEAT_MON_REWARD; there's no extra
+        # "win" bonus for wild. Trainer wins get TRAINER_WIN_BONUS on top of
+        # the per-mon kills. Catching pays its own CATCH_REWARD/NEW_CATCH_BONUS
+        # earlier and does NOT count as a "win" so the agent isn't pushed to
+        # catch every Pokemon in sight.
+        if battle_ended:
+            party_alive = any(hp > 0 for hp in party_hp)
+            if not party_alive:
+                reward += self.LOSE_BATTLE
+            elif self._enemy_killed_this_battle and self._battle_was_trainer:
+                reward += self.TRAINER_WIN_BONUS
+            elif self._enemy_killed_this_battle or self._pokemon_caught_this_battle:
+                pass  # already paid via BEAT_MON_REWARD or CATCH_REWARD
+            else:
+                reward += self.FLEE_PENALTY
+
+        # ----- Per-faint penalty -----
+        for i in range(min(len(party_hp), len(self._last_party_hp))):
+            if self._last_party_hp[i] > 0 and party_hp[i] == 0:
+                reward += self.FAINT_PENALTY
+        self._last_party_hp = party_hp
+
+        # ----- Progression -----
+        level_total = sum(rm.party_levels(mem))
+        if level_total > self._base_level_total:
+            reward += self.LEVEL_REWARD * (level_total - self._base_level_total)
+            self._base_level_total = level_total
+
+        flag_count = rm.event_flags_popcount(mem)
+        if flag_count > self._base_flag_count:
+            reward += self.FLAG_REWARD * (flag_count - self._base_flag_count)
+            self._base_flag_count = flag_count
+
+        badge_count = rm.badges_count(mem)
+        if badge_count > self._base_badge_count:
+            reward += self.BADGE_REWARD * (badge_count - self._base_badge_count)
+            self._base_badge_count = badge_count
+
+        self._last_in_battle = in_battle_now
+        return reward
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
     "RewardV0_2_1": RewardV0_2_1,
+    "RewardV0_2_2": RewardV0_2_2,
 }
 
 
