@@ -5,10 +5,10 @@
 # anywhere HP recovers (potion, nurse) — no need to hand-flag heal
 # events.
 #
-# entropy_coef dropped to 0.002 (was 0.03) per Colin's call — more
-# decisive policy commitment given the denser, less-discrete heal
-# signal. Watch H closely; if it crashes to <0.3 inside 50 iters
-# the bump was too aggressive and we revert.
+# entropy_coef 0.03 -> 0.02 per Colin's call — modest reduction to
+# nudge policy commitment given the denser, less-discrete heal
+# signal. Less aggressive than the 0.002 attempt — H should still
+# sit comfortably above 0.5 through the early run.
 run_name: elsa_brock_v0_3_3_ddp4
 state_path: states/blue_fight.state
 total_timesteps: 200_000_000
@@ -21,7 +21,7 @@ gamma: 0.999
 gae_lambda: 0.95
 clip_coef: 0.1
 value_coef: 0.5
-entropy_coef: 0.002
+entropy_coef: 0.02
 max_grad_norm: 0.5
 anneal_lr: true
 seed: 0
