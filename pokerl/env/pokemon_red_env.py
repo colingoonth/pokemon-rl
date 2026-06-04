@@ -28,6 +28,13 @@ ACTIONS: tuple[str, ...] = ("noop", "a", "b", "up", "down", "left", "right")
 # Game Boy RL — gives buttons time to register and animations to play out.
 FRAMES_PER_STEP = 24
 
+# How long to hold a button down (in frames) before releasing. Pokemon Red's
+# movement check requires the direction held for at least ~8 frames; the
+# default pyboy.button() press of 1 frame is far too short to register
+# movement commands. We hold for half the step and let the rest of the step
+# play out animations.
+BUTTON_HOLD_FRAMES = 12
+
 # Observation: downsampled grayscale screen.
 SCREEN_H = 72   # 144 / 2
 SCREEN_W = 80   # 160 / 2
@@ -85,12 +92,19 @@ class PokemonRedEnv(gym.Env):
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         name = ACTIONS[int(action)]
         if name != "noop":
-            self.pyboy.button(name)
+            self.pyboy.button_press(name)
 
-        for _ in range(FRAMES_PER_STEP):
+        running = True
+        for frame in range(FRAMES_PER_STEP):
+            if name != "noop" and frame == BUTTON_HOLD_FRAMES:
+                self.pyboy.button_release(name)
             running = self.pyboy.tick()
             if not running:
                 break
+        # Defensive release in case we broke out of the loop before reaching
+        # BUTTON_HOLD_FRAMES — leaves the emulator in a clean state.
+        if name != "noop":
+            self.pyboy.button_release(name)
 
         self._steps += 1
         obs = self._obs()
