@@ -432,3 +432,51 @@ def test_v23_heal_on_non_pc_map_does_not_pay():
     got = r.compute(mem)
     # No PC_HEAL_* fires off-map. Only step penalty.
     assert abs(got - r.STEP_PENALTY) < 1e-9
+
+
+# ---------- RewardV0_2_4 family (faint-magnitude sweep) ----------
+
+from pokerl.env.rewards import (
+    RewardV0_2_4_f25,
+    RewardV0_2_4_f50,
+    RewardV0_2_4_f100,
+)
+
+
+def test_v24_f25_faint_magnitude():
+    assert RewardV0_2_4_f25.FAINT_PENALTY == -25.0
+    assert RewardV0_2_4_f25.PC_FIRST_VISIT == 5.0  # inherits from V0.2.3
+    assert RewardV0_2_4_f25.PC_HEAL_LOW == 2.0
+
+
+def test_v24_f50_faint_magnitude():
+    assert RewardV0_2_4_f50.FAINT_PENALTY == -50.0
+
+
+def test_v24_f100_faint_magnitude():
+    assert RewardV0_2_4_f100.FAINT_PENALTY == -100.0
+
+
+def test_v24_faint_penalty_actually_fires_at_overridden_magnitude():
+    """End-to-end: lose-battle scenario produces the per-variant magnitude."""
+    for cls, expected_penalty in [
+        (RewardV0_2_4_f25, -25.0),
+        (RewardV0_2_4_f50, -50.0),
+        (RewardV0_2_4_f100, -100.0),
+    ]:
+        state = base_state(x=8, y=13)
+        _set_party_hp(state, 0, 5, 22)
+        state[rm.ADDR_IN_BATTLE] = 1
+        state[rm.ADDR_ENEMY_MON_SPECIES] = 16
+        state[rm.ADDR_ENEMY_MON_HP + 1] = 30
+        mem = FakeMem(state)
+        r = cls()
+        r.reset(mem)
+        r.compute(mem)  # enter battle
+        _set_party_hp(state, 0, 0, 22)
+        state[rm.ADDR_IN_BATTLE] = 0
+        got = r.compute(mem)
+        expected = r.STEP_PENALTY + expected_penalty + r.LOSE_BATTLE
+        assert abs(got - expected) < 1e-9, (
+            f"{cls.__name__}: got {got}, expected {expected}"
+        )

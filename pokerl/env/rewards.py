@@ -538,12 +538,46 @@ class RewardV0_2_3(RewardV0_2_2):
         return reward
 
 
+class RewardV0_2_4_f25(RewardV0_2_3):
+    """V0.2.3 with FAINT_PENALTY relaxed to -25.
+
+    Watching V0.2.3 (14376, 14430) showed the agent refusing to engage in
+    battles at all — -250 made the expected value of any uncertain fight
+    catastrophically negative. Death spiral: no battles -> no learning ->
+    no confidence -> still no battles.
+
+    V0.2.4 family sweeps the faint magnitude to find the smallest value
+    that still dominates per-life exploration gain (~+200) without
+    triggering the death spiral. At -25, an 80%-confidence battle has
+    EV = 0.8*10 + 0.2*(-7 + -25) = +1.6 -- positive, so the agent has
+    a gradient signal toward fighting. At -50 and -100 the breakeven
+    confidence threshold rises but stays well below V0.2.3's ~96%.
+    """
+
+    FAINT_PENALTY = -25.0
+
+
+class RewardV0_2_4_f50(RewardV0_2_3):
+    """V0.2.3 with FAINT_PENALTY = -50."""
+
+    FAINT_PENALTY = -50.0
+
+
+class RewardV0_2_4_f100(RewardV0_2_3):
+    """V0.2.3 with FAINT_PENALTY = -100."""
+
+    FAINT_PENALTY = -100.0
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
     "RewardV0_2_1": RewardV0_2_1,
     "RewardV0_2_2": RewardV0_2_2,
     "RewardV0_2_3": RewardV0_2_3,
+    "RewardV0_2_4_f25": RewardV0_2_4_f25,
+    "RewardV0_2_4_f50": RewardV0_2_4_f50,
+    "RewardV0_2_4_f100": RewardV0_2_4_f100,
 }
 
 
