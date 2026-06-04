@@ -1,0 +1,21 @@
+# V2.1: same PPO setup as elsa_brock.yaml, exploration rewards scaled
+# down 3x to relatively boost combat signals. Run for direct A/B
+# against elsa_brock (V2.0).
+run_name: elsa_brock_v2_1
+total_timesteps: 200_000_000
+n_envs: 32
+n_steps: 256
+n_epochs: 4
+minibatch_size: 512
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV2_1

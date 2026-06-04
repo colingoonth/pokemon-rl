@@ -256,9 +256,24 @@ class RewardV2:
         return len(self._visited)
 
 
+class RewardV2_1(RewardV2):
+    """V2 with exploration rewards scaled down to relatively-boost combat.
+
+    V2's first ELSA run showed +700 returns dominated by exploration
+    rewards (32 envs visited 5500+ tiles in 80k steps). Combat signals
+    (+5 encounter, +10 win, -7 lose, +100 badge) were correctly firing
+    but vastly outweighed by exploration. V2.1 cuts exploration ~3x so
+    combat has a comparable pull on the policy.
+    """
+
+    EXPLORE_REWARD = 0.3   # was 1.0
+    MOVE_BONUS = 0.05      # was 0.2
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV1": RewardV1,
     "RewardV2": RewardV2,
+    "RewardV2_1": RewardV2_1,
 }
 
 
