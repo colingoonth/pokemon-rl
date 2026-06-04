@@ -253,3 +253,182 @@ def test_v2_level_up_pays_three():
     state[rm.ADDR_PARTY_MON_BASE + rm.PMON_OFFSET_LEVEL] = 8
     got = r.compute(mem)
     assert abs(got - (r.STEP_PENALTY + 2 * r.LEVEL_REWARD)) < 1e-9
+
+
+# ---------- RewardV0_2_3 ----------
+
+from pokerl.env.rewards import RewardV0_2_3
+
+
+def test_v23_pc_heal_low_hp_pays_plus_2():
+    state = base_state(map_id=rm.MAP_VIRIDIAN_POKECENTER)
+    _set_party_hp(state, 0, 5, 22)  # 22% HP
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+    # Baseline step at low HP — no heal event yet
+    r.compute(mem)
+    # Heal to full
+    _set_party_hp(state, 0, 22, 22)
+    got = r.compute(mem)
+    assert abs(got - (r.STEP_PENALTY + r.PC_HEAL_LOW)) < 1e-9
+
+
+def test_v23_pc_heal_near_full_pays_minus_1():
+    state = base_state(map_id=rm.MAP_VIRIDIAN_POKECENTER)
+    _set_party_hp(state, 0, 20, 22)  # ~91% HP — above 80% AND above 50%
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+    r.compute(mem)
+    _set_party_hp(state, 0, 22, 22)
+    got = r.compute(mem)
+    assert abs(got - (r.STEP_PENALTY + r.PC_HEAL_FULL)) < 1e-9
+
+
+def test_v23_any_mon_below_50_triggers_low_branch():
+    """Party total may be >80% but a single mon <50% still fires LOW."""
+    state = base_state(party_count=2, map_id=rm.MAP_VIRIDIAN_POKECENTER)
+    # Slot 0: 300/300, Slot 1: 49/100 -> party total 349/400 = 87% (>80%)
+    # but slot 1 is below 50%, so LOW branch must fire.
+    _set_party_hp(state, 0, 300, 300)
+    _set_party_hp(state, 1, 49, 100)
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+    r.compute(mem)  # baseline
+    # Heal: both to full
+    _set_party_hp(state, 1, 100, 100)
+    got = r.compute(mem)
+    assert abs(got - (r.STEP_PENALTY + r.PC_HEAL_LOW)) < 1e-9
+
+
+def test_v23_first_visit_pays_plus_5_once():
+    # Start outside PC at full HP
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+
+    # Walk into Viridian PC — first time
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_POKECENTER
+    got = r.compute(mem)
+    expected = (
+        r.STEP_PENALTY
+        + r.EXPLORE_REWARD     # new (map, x, y) tile
+        + r.NEW_MAP_REWARD     # new map_id (parent V0.2.2)
+        + r.PC_FIRST_VISIT     # new PC (V0.2.3)
+    )
+    assert abs(got - expected) < 1e-9
+
+    # Leave, come back — no PC_FIRST_VISIT, no NEW_MAP, no EXPLORE
+    state[rm.ADDR_MAP_ID] = rm.MAP_PALLET_TOWN
+    r.compute(mem)
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_POKECENTER
+    got2 = r.compute(mem)
+    # Position (Viridian PC, 8, 13) already in visited -> MOVE_BONUS
+    assert abs(got2 - (r.STEP_PENALTY + r.MOVE_BONUS)) < 1e-9
+
+
+def test_v23_first_visit_stacks_with_low_hp_heal():
+    """Single-step combo: enter new PC at low HP and heal to full pays both."""
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 5, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+
+    # One step: map changes to PC AND HP heals to max
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_POKECENTER
+    _set_party_hp(state, 0, 22, 22)
+    got = r.compute(mem)
+    expected = (
+        r.STEP_PENALTY
+        + r.EXPLORE_REWARD
+        + r.NEW_MAP_REWARD
+        + r.PC_FIRST_VISIT
+        + r.PC_HEAL_LOW
+    )
+    assert abs(got - expected) < 1e-9
+
+
+def test_v23_faint_penalty_is_minus_250():
+    assert RewardV0_2_3.FAINT_PENALTY == -250.0
+
+    state = base_state(x=8, y=13)
+    _set_party_hp(state, 0, 5, 22)
+    state[rm.ADDR_IN_BATTLE] = 1
+    state[rm.ADDR_ENEMY_MON_SPECIES] = 16
+    state[rm.ADDR_ENEMY_MON_HP + 1] = 30
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+    r.compute(mem)  # enter battle (NEW_ENCOUNTER)
+
+    # Faint + lose
+    _set_party_hp(state, 0, 0, 22)
+    state[rm.ADDR_IN_BATTLE] = 0
+    got = r.compute(mem)
+    expected = r.STEP_PENALTY + r.FAINT_PENALTY + r.LOSE_BATTLE
+    assert abs(got - expected) < 1e-9
+
+
+def test_v23_blackout_suppresses_heal_and_visit():
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 5, 22)
+    state[rm.ADDR_IN_BATTLE] = 1
+    state[rm.ADDR_ENEMY_MON_SPECIES] = 16
+    state[rm.ADDR_ENEMY_MON_HP + 1] = 30
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+    r.compute(mem)  # enter battle
+
+    # Faint -> battle ends with all party dead -> blackout pending
+    _set_party_hp(state, 0, 0, 22)
+    state[rm.ADDR_IN_BATTLE] = 0
+    r.compute(mem)
+    assert r._blackout_pending is True
+
+    # Whiteout: warp to Viridian PC with party force-healed
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_POKECENTER
+    _set_party_hp(state, 0, 22, 22)
+    got = r.compute(mem)
+
+    # Heal and first-visit are suppressed. Parent rewards still fire:
+    # STEP_PENALTY + EXPLORE_REWARD (new tile) + NEW_MAP_REWARD (new map_id)
+    expected = r.STEP_PENALTY + r.EXPLORE_REWARD + r.NEW_MAP_REWARD
+    assert abs(got - expected) < 1e-9
+    assert r._blackout_pending is False
+    # PC was recorded as visited so future *voluntary* visits don't pay +5
+    assert rm.MAP_VIRIDIAN_POKECENTER in r._visited_pokecenters
+
+
+def test_v23_reset_at_pc_preseeds_visited():
+    """Spawning on a PC map_id should not later pay PC_FIRST_VISIT for it."""
+    state = base_state(map_id=rm.MAP_VIRIDIAN_POKECENTER)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+    assert rm.MAP_VIRIDIAN_POKECENTER in r._visited_pokecenters
+
+    # Move tile within the PC — should only pay EXPLORE for the new tile
+    state[rm.ADDR_PLAYER_X] = 9
+    got = r.compute(mem)
+    assert abs(got - (r.STEP_PENALTY + r.EXPLORE_REWARD)) < 1e-9
+
+
+def test_v23_heal_on_non_pc_map_does_not_pay():
+    """Heal events outside PCs (e.g. potions in overworld) pay nothing."""
+    state = base_state(map_id=rm.MAP_ROUTE_1)
+    _set_party_hp(state, 0, 5, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_3()
+    r.reset(mem)
+    r.compute(mem)  # baseline
+    _set_party_hp(state, 0, 22, 22)
+    got = r.compute(mem)
+    # No PC_HEAL_* fires off-map. Only step penalty.
+    assert abs(got - r.STEP_PENALTY) < 1e-9

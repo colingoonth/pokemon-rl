@@ -213,9 +213,81 @@ The big behavioral targets:
 - Does entropy stay healthy (>0.5) like in V0.2.1, or does some
   newly-grindable signal cause another collapse?
 
+**ELSA run summary.** Job 14143. Cancelled at iter 800 (~1 hour, ~6.4M steps)
+once the blackout exploit was identified from watching `iter_000800.pt`.
+
+**Observed behavior.** Entropy held healthy (no collapse). Tiles per batch
+high (4.5k–20k). Mean return last20 oscillated +230 to +390 — looked good
+on paper. But watching the policy revealed: agent explored aggressively,
+let its starter faint, blacked out, respawned fully healed, kept going.
+Never voluntarily used a Pokemon Center.
+
+**Diagnosis.** The **blackout-as-free-heal exploit**. V0.2.2 keeps the
+inherited `FAINT_PENALTY = -2` and `LOSE_BATTLE = -7`. Net cost of dying:
+about -9. Per-life exploration gain: ~+200-300. Net per-blackout-cycle
+is strongly positive, so the policy converged on "die, respawn, explore."
+Same structural shape as V0.2.1's flee-as-win — a "loss" event netting
+positive reward because the alternative routes pay less.
+
+**Lesson recorded.** Whenever a "loss" event has a partial-refund
+mechanic in-game (whiteout heals, flee escapes), the penalty must
+dominate the alternative path's reward — not just be "non-trivial."
+
+---
+
+## V0.2.3 — Pokemon Center heal rewards + harsh faint penalty
+
+**File:** `RewardV0_2_3` (inherits from `RewardV0_2_2`)
+
+**Changes from V0.2.2:**
+
+| Signal | V0.2.2 | V0.2.3 |
+|---|---|---|
+| Party member faints | -2 | **-250** |
+| Heal at PC, low HP (`party<80%` OR `any<50%`) | not rewarded | **+2** (PC_HEAL_LOW) |
+| Heal at PC, near-full HP | not rewarded | **-1** (PC_HEAL_FULL — anti-spam) |
+| First-time visit to a given PC map_id | not rewarded | **+5** (PC_FIRST_VISIT, stacks) |
+| Blackout-triggered heal/visit | n/a | **suppressed** (no refund of -250) |
+
+PC map_ids hardcoded in `ram_map.POKECENTER_MAP_IDS` from pret/pokered
+constants (Viridian + Pewter + 8 later-game centers).
+
+**Design rationale.**
+
+1. **Kill the blackout exploit, hard.** Faint penalty bumped from -2 to
+   -250 — chosen to dominate the ~+200-300 per-life exploration gain seen
+   in V0.2.2 logs. Per-faint (not per-blackout): direct constant swap.
+2. **Make PCs the *positive* heal route.** +5 for finding each new PC
+   plus +2 for an actual heal-when-low gives the agent a clear reason
+   to walk into a Pokemon Center voluntarily, where V0.2.2 gave none.
+3. **Stop heal-spam.** Healing at near-full HP costs -1. Combined with
+   step-penalty walking time, looping into a PC for a top-up is
+   negative-EV.
+4. **Don't refund blackouts.** When the game force-heals after whiteout,
+   the heal-event detection would otherwise refund +2 and +5. Explicit
+   `_blackout_pending` flag set when LOSE_BATTLE fires; suppresses next
+   heal/visit reward and clears.
+
+**Reward math at the new weights:**
+- Faint a Pokemon in battle: **-250**
+- Voluntary heal at new PC, low HP: **+5 + +2 = +7**
+- Voluntary heal at known PC, low HP: **+2**
+- Voluntary heal at any PC, near-full: **-1**
+- Blackout into a PC: **-250** (the heal/visit refund is suppressed)
+- First time entering Pewter PC: **+5 + +5 (NEW_MAP) + +0.3 (EXPLORE) = +10.3**
+
+**Hypotheses to test in ELSA training:**
+- Does the blackout loop die? (Strong prior: yes — -250 > +200-300.)
+- Does the agent learn to visit PCs voluntarily? (Open — depends on
+  whether PPO can credit-assign the +2/+5 sparse signal across the
+  multi-step walk-to-PC sequence.)
+- Does the -250 cause extreme risk aversion? (Possible failure mode:
+  agent avoids battles entirely. Watch entropy + battle-count metrics.)
+- Does the agent reach Pewter? (V1 milestone: clear Brock.)
+
 **Status:** Config + sbatch ready
-(`configs/elsa_brock_v0_2_2.yaml`, `slurm/train_brock_v0_2_2.sbatch`).
-Launch when V0.2.1 is cancelled.
+(`configs/elsa_brock_v0_2_3.yaml`, `slurm/train_brock_v0_2_3.sbatch`).
+Launch on ELSA after V0.2.2 is cancelled (`scancel 14143`).
 
 ---
 
@@ -226,5 +298,6 @@ Launch when V0.2.1 is cancelled.
 | V0.1 | Cancelled | First attempt | Confounded by env button-hold bug |
 | V0.2 | Cancelled | + movement bonus + battle suite | Entropy collapse to 0 by iter 1100 |
 | V0.2.1 | Cancelled | exploration scaled 3× down | Avoided collapse but exposed flee-as-win exploit |
-| V0.2.2 | Queued | flee fix + new-map / catch rewards | TBD — pending run |
+| V0.2.2 | Cancelled | flee fix + new-map / catch rewards | Healthy metrics, but blackout-as-free-heal exploit |
+| V0.2.3 | Queued | PC heal rewards + -250 faint + blackout guard | TBD — pending run |
 | V1.0 | Reserved | First version to clear Brock | — |

@@ -434,11 +434,116 @@ class RewardV0_2_2(RewardV0_2_1):
         return reward
 
 
+class RewardV0_2_3(RewardV0_2_2):
+    """V0.2.2 + Pokemon Center heal rewards + harsh faint penalty.
+
+    V0.2.2 had a blackout-as-free-heal exploit: agent learns the loop
+    "explore, take damage, faint, respawn fully healed at last PC, repeat."
+    Faint penalty (-2) was dwarfed by per-life exploration gain (+200-300).
+
+    V0.2.3 makes blackout strictly worse than the PC route:
+      PC_HEAL_LOW    +2    healed at PC when party_hp < 80% OR any mon < 50%
+      PC_HEAL_FULL   -1    healed at PC at near-full HP (anti-spam)
+      PC_FIRST_VISIT +5    first time stepping into a given PC map_id
+                           (stacks with PC_HEAL_* on first-time real heal)
+      FAINT_PENALTY  -250  (was -2). Must dominate per-life exploration gain.
+
+    Blackout guard: when the game whites out and force-heals the party at
+    the last-visited PC (or home), the heal-event detection would otherwise
+    fire PC_HEAL_LOW + PC_FIRST_VISIT and partially refund the -250. We
+    set _blackout_pending=True when LOSE_BATTLE triggers, suppress the
+    next heal/visit reward, then clear the flag.
+    """
+
+    FAINT_PENALTY = -250.0
+    PC_HEAL_LOW = 2.0
+    PC_HEAL_FULL = -1.0
+    PC_FIRST_VISIT = 5.0
+    LOW_HP_PARTY_THRESHOLD = 0.80
+    LOW_HP_ANY_THRESHOLD = 0.50
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._visited_pokecenters: set[int] = set()
+        self._blackout_pending = False
+        self._last_party_hp_max: list[int] = []
+
+    def reset(self, mem: MemoryView) -> None:
+        super().reset(mem)
+        self._visited_pokecenters = set()
+        if rm.map_id(mem) in rm.POKECENTER_MAP_IDS:
+            self._visited_pokecenters.add(rm.map_id(mem))
+        self._blackout_pending = False
+        self._last_party_hp_max = [mx for _cur, mx in rm.party_hp(mem)]
+
+    def compute(self, mem: MemoryView) -> float:
+        # Snapshot prev state BEFORE super() overwrites self._last_party_hp
+        prev_cur = list(self._last_party_hp)
+        prev_max = list(self._last_party_hp_max)
+
+        party_hp = rm.party_hp(mem)
+        cur_hp = [c for c, _m in party_hp]
+        max_hp = [m for _c, m in party_hp]
+
+        current_map = rm.map_id(mem)
+        on_pc_map = current_map in rm.POKECENTER_MAP_IDS
+
+        prev_total = sum(prev_cur)
+        prev_total_max = sum(prev_max) if prev_max else 0
+        was_below_max = prev_max and prev_total < prev_total_max
+        all_at_max = len(party_hp) > 0 and all(
+            c == m for c, m in party_hp if m > 0
+        )
+        heal_event_now = bool(on_pc_map and was_below_max and all_at_max)
+        first_visit_now = on_pc_map and current_map not in self._visited_pokecenters
+
+        # Delegate to parent for base reward (movement, battles, faints, etc.)
+        # FAINT_PENALTY override propagates via self lookup.
+        reward = super().compute(mem)
+
+        if heal_event_now or first_visit_now:
+            if self._blackout_pending:
+                # Suppress refund from blackout-triggered heal/visit
+                if first_visit_now:
+                    self._visited_pokecenters.add(current_map)
+                self._blackout_pending = False
+            else:
+                if first_visit_now:
+                    self._visited_pokecenters.add(current_map)
+                    reward += self.PC_FIRST_VISIT
+                if heal_event_now:
+                    if prev_total_max > 0:
+                        prev_pct = prev_total / prev_total_max
+                    else:
+                        prev_pct = 1.0
+                    any_low = any(
+                        (pc / pm) < self.LOW_HP_ANY_THRESHOLD
+                        for pc, pm in zip(prev_cur, prev_max)
+                        if pm > 0
+                    )
+                    if prev_pct < self.LOW_HP_PARTY_THRESHOLD or any_low:
+                        reward += self.PC_HEAL_LOW
+                    else:
+                        reward += self.PC_HEAL_FULL
+
+        # Detect blackout trigger: battle just ended with the whole party dead.
+        # Parent already updated _last_in_battle, so use the snapshotted prev_cur.
+        was_alive_last = any(c > 0 for c in prev_cur) if prev_cur else False
+        all_dead_now = len(cur_hp) > 0 and all(c == 0 for c in cur_hp)
+        in_battle_now = rm.in_battle(mem)
+        if in_battle_now == 0 and all_dead_now and was_alive_last:
+            self._blackout_pending = True
+
+        self._last_party_hp_max = max_hp
+        return reward
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
     "RewardV0_2_1": RewardV0_2_1,
     "RewardV0_2_2": RewardV0_2_2,
+    "RewardV0_2_3": RewardV0_2_3,
 }
 
 
