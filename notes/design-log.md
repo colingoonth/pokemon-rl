@@ -261,3 +261,136 @@ in tomorrow's metrics, and what each outcome implies:
   different party levels) for v1.5?
 - At what badge milestone (if any) does the project transition from
   "PPO + tuning" to "fundamentally different algorithm needed"?
+
+## 2026-06-04 — Day 2: V0.3.x curriculum + abandoned multi-node DDP
+
+### The reward arc up to today
+
+V0.2.7 (BEAT_MON +20, TRAINER_WIN +30, FLEE_PENALTY -1) was supposed
+to break V0.2.6's flee-everything behavior by dropping the fight
+breakeven from 74% to 60% win confidence. After 3500 iters / 29M
+steps it was still flee-dominant. The math was right but the
+bootstrap was wrong: agent needed to fight to learn win-prob > 60%,
+but wouldn't fight until it believed it could.
+
+### V0.3.0: curriculum fork
+
+The cleanest break from V0.2.x: change the start state. Captured a
+save state at the FIGHT menu of the Squirtle-vs-Bulbasaur rival
+battle (`states/blue_fight.state`). Rival battle is unavoidable, so
+combat reward is the only signal early on. Plumbed `state_path`
+through `PPOConfig -> train -> make_vec_env` (one new field on the
+config dataclass).
+
+I labelled this V0.3 instead of V0.2.8 because changing the start
+state changes the *task*, not the reward function. V0.2.x was
+"tune the reward." V0.3.x is "change the curriculum." Different
+axis, different version namespace, cleaner writeup later.
+
+V0.3.0 results: reached V0.2.7's ceiling ~3.5x faster (iter 1000 /
+8M steps to hit +450 vs V0.2.7's iter 3500 / 29M to hit +440), but
+return then oscillated 260-530 instead of climbing. Watching a
+mid-training checkpoint showed the agent correctly going into fights
+and fleeing only when they looked unwinnable. That's *rational* EV
+behavior, not a failure — it's the V0.2.7 reward function working as
+designed at the 60% breakeven. The issue is the threshold is still
+too high for early-stage Squirtle against most of Route 1.
+
+### V0.3.1: FLEE_PENALTY -1 -> -5
+
+Two reward-shaping options to push past V0.3.0's plateau:
+
+1. **DAMAGE_DEALT shaping** — small per-attack reward. Rejected:
+   would teach "Tail Whip = 0 damage = bad" and close off the
+   status-move branch (Tail Whip stacking is genuinely optimal in
+   some L5 matchups; can't bake in a "damage = good" prior).
+2. **FLEE_PENALTY bump** — only penalizes the leave-battle action,
+   doesn't bias in-battle action selection. Status-move learning
+   preserved. Drops fight-vs-flee breakeven from 60% to ~45%.
+
+Picked (2). Launched as RewardV0_3_1 with FLEE_PENALTY = -5.
+
+### Bug found mid-flight: eval-time start-state mismatch
+
+When I tried to watch the V0.3.0 policy, it looked like the agent
+was starting in Pallet Town, not the FIGHT menu. Almost concluded
+training was broken too. Actually `watch.py` had never been wired
+to accept `--state-path` — it used the env default
+(`post_intro.state`). Training was using `blue_fight.state`
+correctly; only eval was mismatched. Added the `--state-path` flag
+and confirmed first frame is Squirtle vs Bulbasaur as intended.
+
+Lesson for V0.4 onward: any time we add a config knob that affects
+the training environment, the eval scripts need the same knob.
+There's no shared "env config" abstraction — make.py takes raw
+kwargs at each call site.
+
+### Multi-node DDP: tried and abandoned
+
+After single-node 4xL40S hit its 1.47x ceiling (PyBoy CPU bound),
+multi-node was the obvious next lever. ELSA has 8 L40S nodes total
+(gpu-node001-005, 019-021), each 32-core 4-GPU. Theoretical 8x
+ceiling.
+
+Scaffolding built before launch:
+- `pokerl/scripts/bench_nccl.py` — 30-line rendezvous + all_reduce
+  bandwidth probe
+- `slurm/sanity_multinode.sbatch` — 2-node, 10-min, no-training
+  sanity test
+- `slurm/train_brock_bench_2n.sbatch` + `configs/elsa_brock_bench_2n.yaml` —
+  2N throughput bench at 48 envs / mb=768 / lr=3.06e-4 (sqrt(1.5)
+  scale per Hilton 2021), 10M timestep budget
+
+Three reviews flagged issues:
+- **SLURM/torchrun:** sbatch pattern was mostly right but needed
+  `--rdzv-id=$SLURM_JOB_ID`, `NCCL_IB_DISABLE=1`,
+  `NCCL_SOCKET_IFNAME=^lo,docker`, per-job MASTER_PORT, and
+  `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=600`. Applied all.
+- **PPO at scale:** "minibatch ∝ n_envs" alone is insufficient — PPO
+  is not batch-size invariant. Use sqrt-LR scaling from launch (not
+  wait-and-see), bump entropy_coef proportionally to counter
+  premature sharpening, log clip_fraction/approx_kl/explained_variance
+  as scaling tripwires.
+- **End-to-end risk:** found two real bugs in train.py — all ranks
+  using identical seed (wasted parallelism) and relative `state_path`
+  being fragile under async-subprocess cwd inheritance on multi-node.
+  Both fixed; kept the fixes because they're correctness fixes that
+  apply single-node too.
+
+**Why I abandoned:**
+
+Two independent reviews projected realistic 2N speedup at ~1.7x and
+8N possibly *slower* than 4N due to NCCL Ethernet overhead. So the
+upper bound on multi-node speedup was modest to begin with.
+
+Then queue contention killed the math. Submitted the 2N sanity test
+(needs 2 *whole* L40S nodes simultaneously). All 8 L40S nodes were
+in `mix` state (partially allocated) with a backlog of dozens of
+queued jobs from other users — sanity sat in PD with reason
+`(Priority)` for ~15 min before I bailed. Even a 1.7x throughput
+gain doesn't pay for a queue wait of 30+ min per launch when single-
+node submits run within seconds. The "iterate faster" goal gets
+eaten by queue time.
+
+Scaffolding deleted on this date. Reviews + decision preserved here
+so I don't reconsider this if I forget the cluster contention story.
+
+**What I kept from this thread:**
+
+1. The two train.py bug fixes — per-rank seed offset
+   (`cfg.seed + dctx.rank * 1000`) and absolute `state_path`
+   resolution against `ROOT`. Real bugs, ship them.
+2. The PPO-at-scale notes — sqrt-LR, entropy bump, tripwire metrics.
+   Won't need them now but worth remembering if I ever do
+   reconsider multi-node.
+3. The cluster topology map (8 L40S nodes, all 32-core, no
+   Infiniband). Documents reality for future me.
+
+**What would change my mind on multi-node:**
+
+- ELSA gets less contested (semester ends, summer break, etc.)
+- Single-node ceases to be a bottleneck (e.g., we pivot off PyBoy
+  to a parallelizable emulator, removing the 1.47x cap)
+- A multi-day training run becomes the experiment unit (writeup
+  finale, demo for portfolio) where the queue wait is a one-time
+  cost amortized over many GPU-hours
