@@ -1,0 +1,23 @@
+# V0.2.3 DDP variant: 4 GPUs on one ELSA gpu-node, torchrun-driven.
+# n_envs is GLOBAL (across all 4 ranks). Each rank runs n_envs/4 = 8 envs.
+# Same reward + hyperparameters as the 32-env single-GPU baseline so this
+# is a clean wall-clock A/B for DDP scaling.
+# minibatch_size is also GLOBAL (per-rank = 512 / 4 = 128).
+run_name: elsa_brock_v0_2_3_ddp4
+total_timesteps: 200_000_000
+n_envs: 32
+n_steps: 256
+n_epochs: 4
+minibatch_size: 512
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_2_3

@@ -24,8 +24,10 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium.vector import VectorEnv
 from torch.distributions import Categorical
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from pokerl.agent.networks import ActorCritic
+from pokerl.infra import dist as dist_helpers
 from pokerl.infra.logging import CSVLogger
 
 
@@ -113,48 +115,90 @@ def train(
     cfg: PPOConfig,
     resume_path: Path | None = None,
 ) -> ActorCritic:
-    torch.manual_seed(cfg.seed)
-    np.random.seed(cfg.seed)
+    # Distributed context — env-var-driven. world_size=1 = single-process path,
+    # exactly the original behavior. >1 = torchrun-launched DDP.
+    dctx = dist_helpers.get_dist_info()
+
+    # Per-rank seeding so each rank's stochastic policy + env resets are
+    # disjoint but deterministic.
+    torch.manual_seed(cfg.seed + dctx.rank)
+    np.random.seed(cfg.seed + dctx.rank)
 
     envs = env_fn()
     assert isinstance(envs.single_action_space, gym.spaces.Discrete)
-    n_envs = envs.num_envs
-    assert n_envs == cfg.n_envs, (
-        f"env_fn produced {n_envs} envs but PPOConfig.n_envs={cfg.n_envs}"
+    n_envs_local = envs.num_envs
+    # cfg.n_envs is the GLOBAL convention (total across all ranks). The
+    # train script is responsible for constructing env_fn with the per-rank
+    # slice. Sanity-check here.
+    expected_per_rank = cfg.n_envs // dctx.world_size
+    assert n_envs_local == expected_per_rank, (
+        f"env_fn produced {n_envs_local} envs/rank but expected "
+        f"{expected_per_rank} (cfg.n_envs={cfg.n_envs}, world={dctx.world_size})"
     )
+    assert cfg.n_envs % dctx.world_size == 0, (
+        f"cfg.n_envs={cfg.n_envs} not divisible by world_size {dctx.world_size}"
+    )
+    n_envs_global = cfg.n_envs
+
     obs_shape: tuple[int, ...] = tuple(envs.single_observation_space.shape)
     n_actions = int(envs.single_action_space.n)
 
-    device = torch.device(cfg.device)
-    net = ActorCritic(obs_shape, n_actions=n_actions).to(device)
+    if dctx.is_distributed:
+        device = torch.device(f"cuda:{dctx.local_rank}")
+    else:
+        device = torch.device(cfg.device)
+
+    raw_net = ActorCritic(obs_shape, n_actions=n_actions).to(device)
     if resume_path is not None:
         state = torch.load(resume_path, map_location=device, weights_only=True)
-        net.load_state_dict(state)
-        print(f"Resumed weights from {resume_path}")
+        raw_net.load_state_dict(state)
+        if dctx.is_main:
+            print(f"Resumed weights from {resume_path}")
+
+    # Wrap with DDP AFTER resume-load (else state-dict keys are 'module.<X>').
+    if dctx.is_distributed:
+        net: nn.Module = DDP(
+            raw_net, device_ids=[dctx.local_rank], output_device=dctx.local_rank
+        )
+        # NCCL warmup: amortize the first-collective handshake outside the
+        # per-iter timer so iter-1 isn't a 200-500ms outlier.
+        import torch.distributed as _d
+        _d.all_reduce(torch.zeros(1, device=device))
+    else:
+        net = raw_net
+
     optimizer = optim.Adam(net.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
-    obs_np, _ = envs.reset(seed=cfg.seed)
+    # Disjoint per-rank env seeding. Spaced by 10k so reset seeds don't
+    # collide across ranks for any realistic n_envs_local.
+    obs_np, _ = envs.reset(seed=cfg.seed + dctx.rank * 10_000)
     obs_t = torch.from_numpy(obs_np).to(device)
-    dones_t = torch.zeros(n_envs, dtype=torch.float32, device=device)
+    dones_t = torch.zeros(n_envs_local, dtype=torch.float32, device=device)
 
-    batch_size = cfg.n_steps * n_envs
-    assert batch_size % cfg.minibatch_size == 0, (
-        f"batch_size {batch_size} not divisible by minibatch_size {cfg.minibatch_size}"
+    # Per-rank batch sizes. minibatch_size in yaml is GLOBAL convention too.
+    batch_size_local = cfg.n_steps * n_envs_local
+    batch_size_global = batch_size_local * dctx.world_size
+    assert cfg.minibatch_size % dctx.world_size == 0, (
+        f"cfg.minibatch_size={cfg.minibatch_size} not divisible by "
+        f"world_size {dctx.world_size}"
+    )
+    minibatch_size_local = cfg.minibatch_size // dctx.world_size
+    assert batch_size_local % minibatch_size_local == 0, (
+        f"batch_size_local {batch_size_local} not divisible by "
+        f"minibatch_size_local {minibatch_size_local}"
     )
 
-    n_iterations = max(1, cfg.total_timesteps // batch_size)
-    global_step = 0
+    n_iterations = max(1, cfg.total_timesteps // batch_size_global)
+    global_step = 0  # counts GLOBAL samples (sum across all ranks)
 
-    ep_returns_running = np.zeros(n_envs, dtype=np.float64)
-    ep_lengths_running = np.zeros(n_envs, dtype=np.int64)
+    ep_returns_running = np.zeros(n_envs_local, dtype=np.float64)
+    ep_lengths_running = np.zeros(n_envs_local, dtype=np.int64)
     finished_returns: list[float] = []
 
-    csv_logger = CSVLogger(cfg.log_csv) if cfg.log_csv else None
-
-    # Checkpoint dir is colocated with the metrics CSV (so the train script's
-    # run_dir choice is the single source of truth for run artifacts).
+    # CSV + checkpoints are rank-0 only. Other ranks keep these None.
+    csv_logger = CSVLogger(cfg.log_csv) if (dctx.is_main and cfg.log_csv) else None
     ckpt_dir: Path | None = None
-    if cfg.save_every > 0 and cfg.log_csv:
+    if dctx.is_main and cfg.save_every > 0 and cfg.log_csv:
         ckpt_dir = Path(cfg.log_csv).parent / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -165,10 +209,10 @@ def train(
             for g in optimizer.param_groups:
                 g["lr"] = frac * cfg.learning_rate
 
-        buf = RolloutBuffer.empty(cfg.n_steps, n_envs, obs_shape, cfg.device)
+        buf = RolloutBuffer.empty(cfg.n_steps, n_envs_local, obs_shape, str(device))
 
         for step in range(cfg.n_steps):
-            global_step += n_envs
+            global_step += n_envs_global
             buf.obs[step] = obs_t
             buf.dones[step] = dones_t
 
@@ -209,20 +253,20 @@ def train(
             gae_lambda=cfg.gae_lambda,
         )
 
-        # Flatten (n_steps, n_envs, ...) -> (batch_size, ...)
-        b_obs = buf.obs.reshape((batch_size, *obs_shape))
-        b_actions = buf.actions.reshape(batch_size)
-        b_log_probs = buf.log_probs.reshape(batch_size)
-        b_advantages = buf.advantages.reshape(batch_size)
-        b_returns = buf.returns.reshape(batch_size)
-        b_values = buf.values.reshape(batch_size)
+        # Flatten (n_steps, n_envs_local, ...) -> (batch_size_local, ...)
+        b_obs = buf.obs.reshape((batch_size_local, *obs_shape))
+        b_actions = buf.actions.reshape(batch_size_local)
+        b_log_probs = buf.log_probs.reshape(batch_size_local)
+        b_advantages = buf.advantages.reshape(batch_size_local)
+        b_returns = buf.returns.reshape(batch_size_local)
+        b_values = buf.values.reshape(batch_size_local)
 
-        indices = np.arange(batch_size)
+        indices = np.arange(batch_size_local)
         last_pg_loss = last_v_loss = last_entropy = 0.0
         for _ in range(cfg.n_epochs):
             np.random.shuffle(indices)
-            for start in range(0, batch_size, cfg.minibatch_size):
-                mb_idx = indices[start : start + cfg.minibatch_size]
+            for start in range(0, batch_size_local, minibatch_size_local):
+                mb_idx = indices[start : start + minibatch_size_local]
                 mb_obs = b_obs[mb_idx]
                 mb_actions = b_actions[mb_idx]
                 mb_old_log_probs = b_log_probs[mb_idx]
@@ -261,21 +305,27 @@ def train(
                 last_entropy = float(entropy.item())
 
         recent = finished_returns[-20:] if finished_returns else [float(ep_returns_running.mean())]
-        mean_ret = float(np.mean(recent))
-        episode_count = len(finished_returns)
+        local_mean_ret = float(np.mean(recent))
+        local_episodes = len(finished_returns)
 
-        # Pull aggregate exploration stats across all envs. Use envs.call so
-        # it works for both Sync and Async vector envs.
+        # Local aggregate exploration stat from this rank's envs.
         try:
             tiles_per_env = envs.call("unique_tiles_visited")
-            unique_tiles_total = int(sum(tiles_per_env))
+            local_tiles = int(sum(tiles_per_env))
         except Exception:
-            unique_tiles_total = 0
+            local_tiles = 0
+
+        # Cross-rank aggregation: mean of per-rank means for returns,
+        # sum-across-ranks for counts. Approximates global stats well when
+        # ranks are balanced (same envs/rank, same step budget).
+        mean_ret = dist_helpers.all_reduce_mean(local_mean_ret, device)
+        episode_count = dist_helpers.all_reduce_sum_int(local_episodes, device)
+        unique_tiles_total = dist_helpers.all_reduce_sum_int(local_tiles, device)
 
         iter_dt = time.perf_counter() - iter_t0
-        sps = (cfg.n_steps * n_envs) / iter_dt if iter_dt > 0 else 0.0
+        sps = batch_size_global / iter_dt if iter_dt > 0 else 0.0
 
-        if iteration % cfg.log_every == 0:
+        if dctx.is_main and iteration % cfg.log_every == 0:
             ts = time.strftime("%H:%M:%S")
             print(
                 f"[{ts}] iter {iteration:4d}  step {global_step:7d}  "
@@ -305,10 +355,16 @@ def train(
 
         if ckpt_dir is not None and iteration % cfg.save_every == 0:
             path = ckpt_dir / f"iter_{iteration:06d}.pt"
-            torch.save(net.state_dict(), path)
+            # Unwrap DDP for checkpoint compatibility with single-process load.
+            state_dict = (
+                net.module.state_dict() if dctx.is_distributed else net.state_dict()
+            )
+            torch.save(state_dict, path)
             print(f"  -> saved checkpoint {path}")
 
     if csv_logger is not None:
         csv_logger.close()
     envs.close()
-    return net
+    # Return the raw module so callers can torch.save without worrying about
+    # the DDP wrapper.
+    return net.module if dctx.is_distributed else net

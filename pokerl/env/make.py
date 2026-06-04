@@ -73,5 +73,9 @@ def make_vec_env(
 
     env_fns = [_make_one() for _ in range(n_envs)]
     if async_envs:
-        return AsyncVectorEnv(env_fns)
+        # context="spawn": each env subprocess gets a fresh Python interpreter.
+        # Required when the parent has an initialized CUDA context (DDP ranks),
+        # because fork-after-CUDA-init raises "Cannot re-initialize CUDA in
+        # forked subprocess." Safe in single-process mode too.
+        return AsyncVectorEnv(env_fns, context="spawn")
     return SyncVectorEnv(env_fns)
