@@ -685,6 +685,28 @@ class RewardV0_2_6(RewardV0_2_4_f25):
         return reward
 
 
+class RewardV0_2_7(RewardV0_2_6):
+    """V0.2.6 + bumped combat rewards to lower the fight-EV threshold.
+
+    V0.2.6 at iter 2300 (~19M steps) still showed flee-everything
+    behavior. Math: with BEAT_MON +10 and FAINT -25, EV(fight) > EV(flee)
+    requires P(win) > 74% — a high bar for a partially-trained policy.
+    Bumping BEAT_MON to +20 drops the breakeven win confidence to 60%,
+    which is reachable for a moderate policy after a handful of wild
+    battle samples. TRAINER_WIN_BONUS +20 -> +30 makes trainer battles
+    (the V1 critical path on Route 2) more attractive than wild ones.
+
+    Inherits everything else from V0.2.6: f25 balance, +10 Mart/PC
+    bonus, +20 Pewter Gym bonus.
+
+    NOTE: V0.2.7 was originally penciled for dialog detection. That's
+    now V0.2.8 (still pending RAM-byte verification).
+    """
+
+    BEAT_MON_REWARD = 20.0      # was 10 in V0.2.2-V0.2.6
+    TRAINER_WIN_BONUS = 30.0    # was 20 in V0.2.2-V0.2.6
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
@@ -698,6 +720,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_2_5_b50": RewardV0_2_5_b50,
     "RewardV0_2_5_b100": RewardV0_2_5_b100,
     "RewardV0_2_6": RewardV0_2_6,
+    "RewardV0_2_7": RewardV0_2_7,
 }
 
 

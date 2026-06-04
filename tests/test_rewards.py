@@ -649,3 +649,37 @@ def test_v26_gym_and_mart_lists_disjoint():
     assert rm.GYM_MAP_IDS.isdisjoint(rm.POKECENTER_MAP_IDS)
     # And the V1 target is actually in the gym set.
     assert rm.MAP_PEWTER_GYM in rm.GYM_MAP_IDS
+
+
+# ---------- RewardV0_2_7 (combat bump) ----------
+
+from pokerl.env.rewards import RewardV0_2_7
+
+
+def test_v27_combat_magnitudes_bumped():
+    assert RewardV0_2_7.BEAT_MON_REWARD == 20.0
+    assert RewardV0_2_7.TRAINER_WIN_BONUS == 30.0
+    # All other f25 / V0.2.6 inheritance preserved
+    assert RewardV0_2_7.FAINT_PENALTY == -25.0
+    assert RewardV0_2_7.NEW_MAP_REWARD == 5.0
+    assert RewardV0_2_7.MART_PC_BONUS == 10.0
+    assert RewardV0_2_7.GYM_BONUS == 20.0
+
+
+def test_v27_wild_kill_pays_20():
+    """Killing a wild Pokemon now pays +20 (was +10)."""
+    state = base_state(x=8, y=13)
+    _set_party_hp(state, 0, 20, 22)
+    state[rm.ADDR_IN_BATTLE] = 1
+    state[rm.ADDR_ENEMY_MON_SPECIES] = 16  # Pidgey
+    state[rm.ADDR_ENEMY_MON_HP + 1] = 30
+    mem = FakeMem(state)
+    r = RewardV0_2_7()
+    r.reset(mem)
+    r.compute(mem)  # enter battle (NEW_ENCOUNTER)
+    # Enemy HP drops to 0
+    state[rm.ADDR_ENEMY_MON_HP] = 0
+    state[rm.ADDR_ENEMY_MON_HP + 1] = 0
+    got = r.compute(mem)
+    assert abs(got - (r.STEP_PENALTY + r.BEAT_MON_REWARD)) < 1e-9
+    assert r.BEAT_MON_REWARD == 20.0
