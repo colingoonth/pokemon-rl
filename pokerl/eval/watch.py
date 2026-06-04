@@ -37,6 +37,9 @@ def parse_args() -> argparse.Namespace:
                    help="Run headless and dump a gif instead of opening a window")
     p.add_argument("--deterministic", action="store_true",
                    help="Use argmax actions instead of sampling")
+    p.add_argument("--speed", type=float, default=1.0,
+                   help="Emulation speed multiplier in SDL2 mode "
+                        "(1.0=real time, 5.0=5x, 0=unbounded). Ignored when --record.")
     return p.parse_args()
 
 
@@ -56,6 +59,9 @@ def main() -> None:
     args = parse_args()
 
     env = make_env(headless=args.record, max_steps=args.steps + 1, frame_stack=4)
+    if not args.record:
+        # Throttle the SDL2 window to the requested multiple of real time.
+        env.unwrapped.pyboy.set_emulation_speed(args.speed)
     obs, _ = env.reset()
     net = load_net(args.checkpoint, obs.shape, n_actions=len(ACTIONS))
 
