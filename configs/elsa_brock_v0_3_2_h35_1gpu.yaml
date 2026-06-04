@@ -1,0 +1,27 @@
+# V0.3.2 h35 (1-GPU variant): same reward class as ddp4 version,
+# scaled down to single-GPU for faster scheduling. 4-GPU yaml +
+# sbatch remain available for when cluster contention eases.
+#
+# Scaling: n_envs 32 -> 8, minibatch_size 512 -> 128 (proportional)
+# preserves per-rank optimizer-step count. LR held constant; the
+# smaller batch is slightly noisier per-update but more updates
+# per env-step balance out.
+run_name: elsa_brock_v0_3_2_h35_1gpu
+state_path: states/blue_fight.state
+total_timesteps: 200_000_000
+n_envs: 8
+n_steps: 256
+n_epochs: 4
+minibatch_size: 128
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.03
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_3_2_h35
