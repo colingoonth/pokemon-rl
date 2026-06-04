@@ -41,6 +41,10 @@ def parse_args() -> argparse.Namespace:
                    help="Emulation speed multiplier in SDL2 mode "
                         "(1.0=real time, 5.0=5x, 0=unbounded — default). "
                         "Ignored when --record.")
+    p.add_argument("--state-path", type=Path, default=None,
+                   help="Override env start state. None = env default "
+                        "(post_intro.state). Use this to eval a policy "
+                        "from the same state it was trained on.")
     return p.parse_args()
 
 
@@ -59,7 +63,8 @@ def load_net(checkpoint: Path, obs_shape: tuple[int, ...], n_actions: int) -> Ac
 def main() -> None:
     args = parse_args()
 
-    env = make_env(headless=args.record, max_steps=args.steps + 1, frame_stack=4)
+    env = make_env(headless=args.record, max_steps=args.steps + 1,
+                   frame_stack=4, state_path=args.state_path)
     if not args.record:
         # Throttle the SDL2 window to the requested multiple of real time.
         env.unwrapped.pyboy.set_emulation_speed(args.speed)

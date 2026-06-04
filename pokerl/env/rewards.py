@@ -707,6 +707,24 @@ class RewardV0_2_7(RewardV0_2_6):
     TRAINER_WIN_BONUS = 30.0    # was 20 in V0.2.2-V0.2.6
 
 
+class RewardV0_3_1(RewardV0_2_7):
+    """V0.2.7 + bumped FLEE_PENALTY for the curriculum fork.
+
+    V0.3.0 (curriculum start at Blue rival fight) showed the agent
+    correctly EV-fleeing fights below the 60% breakeven — rational
+    given the reward landscape, but stalls combat learning on the
+    wild encounters Squirtle would lose. Bumping FLEE_PENALTY from
+    -1 to -5 drops the fight-vs-flee breakeven from 60% to ~45%,
+    pushing the agent to engage borderline matchups without changing
+    in-battle action selection (Tackle vs Tail Whip vs status moves
+    are unaffected — only the leave-battle action is penalized).
+
+    Inherits everything else from V0.2.7.
+    """
+
+    FLEE_PENALTY = -5.0     # was -1 in V0.2.2-V0.2.7
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
@@ -721,6 +739,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_2_5_b100": RewardV0_2_5_b100,
     "RewardV0_2_6": RewardV0_2_6,
     "RewardV0_2_7": RewardV0_2_7,
+    "RewardV0_3_1": RewardV0_3_1,
 }
 
 
