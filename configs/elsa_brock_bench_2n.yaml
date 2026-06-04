@@ -1,0 +1,29 @@
+# Bench 2N: throughput benchmark for 2-node DDP scaling.
+# Reward = V0.3.1 (curriculum + FLEE_PENALTY -5). Short timestep budget
+# (10M) — purpose is to measure sps, not to train to convergence.
+#
+# Scaling rule (sqrt-LR per Hilton et al. 2021):
+#   K = n_envs(new) / n_envs(base) = 48 / 32 = 1.5
+#   lr_new = lr_base * sqrt(K) = 2.5e-4 * 1.224 = 3.06e-4
+#
+# entropy_coef bumped slightly (0.03 -> 0.035) to counter the
+# entropy-collapse risk that comes with bigger global batches.
+run_name: elsa_brock_bench_2n
+state_path: states/blue_fight.state
+total_timesteps: 10_000_000
+n_envs: 48
+n_steps: 256
+n_epochs: 4
+minibatch_size: 768
+learning_rate: 3.06e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.035
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_3_1

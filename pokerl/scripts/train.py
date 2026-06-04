@@ -88,12 +88,28 @@ def main() -> None:
     if dctx.is_main:
         print(f"Reward: {cfg.reward_class}")
 
+    # Per-rank seed offset. Single-node has only rank 0, so behavior is
+    # unchanged. Multi-rank: each rank rolls a different env trajectory,
+    # so 32 ranks aren't running 32 identical worlds.
+    cfg.seed = cfg.seed + dctx.rank * 1000
+
+    # Resolve relative state_path against repo root before passing into env_fn.
+    # Async env subprocesses are spawned with their own cwd inheritance; under
+    # multi-node DDP each rank may launch from a node where cwd handling is
+    # less reliable. Absolute paths sidestep this class of failure.
+    state_path = cfg.state_path
+    if state_path is not None:
+        sp = Path(state_path)
+        if not sp.is_absolute():
+            sp = ROOT / sp
+        state_path = str(sp)
+
     n_envs_per_rank = cfg.n_envs // dctx.world_size
 
     def env_fn():
         return make_vec_env(
             n_envs=n_envs_per_rank,
-            state_path=cfg.state_path,
+            state_path=state_path,
             headless=True,
             max_steps=4096,
             frame_stack=4,
