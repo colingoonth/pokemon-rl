@@ -116,6 +116,15 @@ POKEMART_MAP_IDS: frozenset[int] = frozenset({
     MAP_SAFFRON_MART,
 })
 
+# Gym map ids. PEWTER_GYM (Brock) is the V1 target and is verified.
+# Other gym ids deferred to V2+ — initial sweep showed my from-memory
+# values for Cerulean Gym (0x41) collided with Cerulean Mart (0x41),
+# so the rest need empirical verification on the actual ROM before
+# being added to the bonus set.
+MAP_PEWTER_GYM = 0x36  # Brock (rock) — V1 target
+
+GYM_MAP_IDS: frozenset[int] = frozenset({MAP_PEWTER_GYM})
+
 
 # --- Readers ---
 

@@ -487,8 +487,155 @@ V0.2.4_f25 policy develops with more time).
    +NEW_MAP_REWARD without the Mart/PC bonus — may need a gym list
    in V0.2.6.)
 
-**Status:** Running through the night. Next assessment 2026-06-04
-morning.
+**ELSA runs.** Jobs 14511 (b20), 14512 (b50), 14513 (b100). DDP 4×L40S
+each. Ran ~8 hours overnight, all cancelled morning 2026-06-04 once
+results clear.
+
+**Observed at iter ~16-17k (~130-140M samples each):**
+
+| | b20 | b50 | b100 |
+|---|---|---|---|
+| mean_return | +504 | +686 | **+796** |
+| episodes | 34144 | 31808 | 32032 |
+| tiles | 15076 | 14879 | **1841** |
+| entropy | 1.82 | 1.84 | **1.87** |
+
+**Diagnosis.** Two layers of regression vs V0.2.4_f25:
+
+1. **`entropy_coef = 0.1` was too high.** All three V0.2.5 entropies
+   are at ~1.85, essentially uniform (max is ln(7) = 1.95). The
+   policy did not commit to anything useful. Strong rewards on
+   specific contexts (battle-flee, doorway-entry) did get learned —
+   PPO entropy regularization averages across states, so individual
+   high-gradient contexts can still commit while the overall policy
+   stays exploratory — but the broad strategy is random walking.
+   - The asymmetric-risk gamble lost on the "too high" side.
+   - Watching b20 iter_17900 / b50 iter_16500 confirmed visually:
+     overworld movement is near-random, but flee-in-battle and
+     enter-doorway are consistent.
+
+2. **NEW_MAP_REWARD scaling broke f25's combat balance.** Even at
+   b20's +20 (4× f25's +5), the EV math flipped: flee-to-explore
+   beats fight-for-XP. New observation in watch: V0.2.5 agents
+   **flee every wild battle** — they correctly optimized the new
+   reward function we gave them. V0.2.4_f25, with NEW_MAP at +5,
+   had organic strategic combat (fled only Pidgey for type
+   disadvantage, fought everything else). The +20 magnitude alone
+   was enough to lift the optimal strategy off the combat path.
+
+**Surprising positives in V0.2.5:**
+- b20 agent **talked to an NPC and received a free potion**. First
+  verified NPC interaction in any V0.x. The high entropy was doing
+  exploration work — random A presses occasionally hit NPCs and the
+  policy didn't unlearn them because there's no penalty. Validates
+  that V0.2.7's dialog reward (when ready) has a behavioral baseline
+  to amplify.
+- All three V0.2.5 agents **entered buildings on purpose** (as a
+  reward-targeting behavior, not just incidental). The building-bonus
+  signal worked.
+
+**Lesson recorded.**
+- **Bonus magnitudes must respect the existing balance.** Adding a
+  large reward for one behavior implicitly de-prioritizes everything
+  else by EV ratio. Always design bonuses as small additions on
+  top of a working balance, not as dominant terms that reshape the
+  optimum.
+- **PPO entropy is a global average.** Bumping `entropy_coef`
+  doesn't enforce per-context randomness — strong-gradient contexts
+  still commit. This is useful for "keep exploring weakly-rewarded
+  states" but doesn't prevent the policy from converging on a bad
+  global strategy if the rewards point there.
+- **Combat is the V1 critical path; never break it for cosmetic
+  rewards.** V0.2.5 broke combat for building entries. Both are
+  needed; design the next iteration to preserve combat behavior
+  while ADDING building/gym signals.
+
+**Status:** All three cancelled 2026-06-04 morning.
+
+---
+
+## V0.2.6 — restore f25 balance + small Mart/PC + Gym bonuses
+
+**File:** `RewardV0_2_6` (subclasses `RewardV0_2_4_f25` — the version
+whose combat balance is proven to work).
+
+**Why this design.** V0.2.5 taught us that the f25 reward structure
+produces useful battle behavior and *must not be regressed*. V0.2.5
+also taught us that small targeted bonuses can teach building entry
+without reshaping the global optimum — as long as the bonuses stay
+small relative to combat rewards.
+
+**Changes from V0.2.4_f25:**
+
+| Signal | V0.2.4_f25 | V0.2.6 |
+|---|---|---|
+| MART_PC_BONUS | (none) | **+10** stacked on NEW_MAP for first visit to a PC or Mart |
+| GYM_BONUS | (none) | **+20** stacked on NEW_MAP for first visit to a gym map_id |
+| `entropy_coef` | 0.01 | **0.03** (3× — between f25's collapse-prone 0.01 and V0.2.5's commit-prevention 0.1) |
+
+Everything else is V0.2.4_f25 unchanged: FAINT -25, NEW_MAP +5,
+BEAT_MON +10, FLEE_PENALTY -1, full V0.2.3 PC heal logic + blackout
+guard. PC_HEAL_LOW is back to +2 (V0.2.5 bumped to +5; V0.2.6 restores).
+
+**Reward math comparison** (key actions, V0.2.4_f25 vs V0.2.6):
+
+| Action | V0.2.4_f25 | V0.2.6 |
+|---|---|---|
+| New tile in grass | +0.3 | +0.3 |
+| Beat wild Pidgey | +10 | +10 |
+| Enter Viridian PC, first time, low HP | +5+5+2 = +12 | +5+5+2+10 = **+22** |
+| Enter Viridian Mart, first time | +5 | +5+10 = **+15** |
+| **Enter Pewter Gym (Brock), first time** | +5 | +5+20 = **+25** |
+| 3-mon trainer battle win | +50 | +50 |
+| Faint a Pokemon | -25 | -25 |
+
+The largest building bonus (Pewter Gym entry, +25) is half of a
+full trainer battle win (+50) and equal to two wild Pidgey kills.
+Combat stays the dominant reward source — building bonuses are
+"destination markers," not goals.
+
+`GYM_MAP_IDS` initially contains ONLY `MAP_PEWTER_GYM = 0x36`
+(verified for V1; the other 7 gym map_ids from memory had a
+collision with the Cerulean Mart 0x41 — collisions surfaced by
+the test_v26_gym_and_mart_lists_disjoint assertion. The other
+gyms need empirical verification on the ROM before being added).
+
+**Why entropy_coef = 0.03 specifically.** f25 at iter 18900 (155M
+steps) had entropy down to 0.29 — strongly committed to a few
+visual heuristics (avoid Pidgey at high HP, fight at 1 HP, enter
+buildings opportunistically for tile rewards). That commitment is
+good for fast convergence but bad for never exploring further
+strategies (e.g. would f25 ever discover "talking to NPCs is
+rewarding" with entropy at 0.29? Probably not within wall-clock
+budgets). 0.03 should slow that collapse: with 3× regularization
+we'd expect entropy to land around 0.5-0.8 at 100M+ samples,
+preserving some plasticity without the "everything is random"
+problem V0.2.5 had at 0.1.
+
+**Dialog detection (V0.2.7 candidate).** Still deferred. The
+empirical observation from V0.2.5 b20 — agent talked to NPC,
+got potion, learned nothing because no reward signal fired —
+is exactly the gap dialog reward would fill. Once we verify the
+RAM byte for "text box active" (likely in the 0xCF80-0xCFD0 range
+based on pret/pokered, but unverified), V0.2.7 = V0.2.6 + dialog
+reward per unique (map_id, x, y) where dialog opens.
+
+**Hypotheses to test:**
+1. Does V0.2.6 reach Pewter Gym? (The +25 GYM_BONUS should pull
+   the policy toward Pewter once an episode finds Route 2 → Forest →
+   Pewter. f25 reached Viridian buildings by 155M; V0.2.6 should
+   reach further given the explicit destination reward.)
+2. Does V0.2.6 keep f25's combat behavior? (Watch checkpoint for
+   strategic fleeing vs flee-everything.)
+3. Does entropy land in the 0.5-0.8 range as predicted? (If it
+   collapses below 0.3, we may need to go to 0.05 in a follow-up.)
+4. Does the agent press A on Brock once it enters the gym? (The
+   existing FLAG_REWARD +10 fires when the Brock-challenged story
+   flag sets — this is sparse but might be enough given the high
+   entropy. If not, V0.2.7 dialog reward is the fix.)
+
+**Status:** Single DDP run (no sweep — design is tighter this
+iteration). Launching 2026-06-04 morning.
 
 ---
 
@@ -501,11 +648,12 @@ morning.
 | V0.2.1 | Cancelled | exploration scaled 3× down | Avoided collapse but exposed flee-as-win exploit |
 | V0.2.2 | Cancelled | flee fix + new-map / catch rewards | Healthy metrics but blackout-as-free-heal exploit |
 | V0.2.3 | Cancelled | PC heal rewards + -250 faint + blackout guard | Killed blackout but agent refused to fight (paralysis) |
-| V0.2.4_f25 | Running | -25 faint (relaxed) | Engages in battles but won't enter buildings |
-| V0.2.4_f50 | Cancelled | -50 faint | Same as V0.2.3 — flee-and-explore, entropy collapsed |
-| V0.2.4_f100 | Cancelled | -100 faint | Highest return (most polished avoidance), no fights |
-| V0.2.5_b20 | Running | +20 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | TBD — overnight run |
-| V0.2.5_b50 | Running | +50 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | TBD — overnight run |
-| V0.2.5_b100 | Running | +100 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | TBD — overnight run |
-| V0.2.6 (planned) | — | Dialog-box detection reward + gym map_id bonus | Pending RAM verification |
+| V0.2.4_f25 | Cancelled (kept overnight) | -25 faint (relaxed) | Engages strategically, enters buildings for tiles, no NPC interaction |
+| V0.2.4_f50 | Cancelled | -50 faint | Flee-and-explore, entropy collapsed |
+| V0.2.4_f100 | Cancelled | -100 faint | Highest return from "polished avoidance," no fights |
+| V0.2.5_b20 | Cancelled | +20 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | Random-walks, flees all fights, but DID interact with NPC accidentally |
+| V0.2.5_b50 | Cancelled | +50 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | Same as b20, slightly higher returns from more map jackpots |
+| V0.2.5_b100 | Cancelled | +100 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | Most "polished avoidance," only 1841 tiles |
+| V0.2.6 | Launching | f25 balance + small Mart/PC +10 + Gym +20 + entropy 0.03 | TBD |
+| V0.2.7 (planned) | — | + dialog detection reward per unique (map, x, y) | Pending RAM verification |
 | V1.0 | Reserved | First version to clear Brock | — |

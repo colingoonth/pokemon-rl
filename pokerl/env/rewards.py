@@ -630,6 +630,61 @@ class RewardV0_2_5_b100(RewardV0_2_5):
     NEW_MAP_REWARD = 100.0
 
 
+class RewardV0_2_6(RewardV0_2_4_f25):
+    """V0.2.4_f25 + small Mart/PC + Gym bonuses, restoring f25's balance.
+
+    Watching the V0.2.5 sweep (b20/b50/b100) revealed a regression: the
+    aggressive +20-to-+100 NEW_MAP_REWARD bonuses caused a new local
+    optimum — agents converged on "flee every battle, explore new maps
+    for the jackpots." V0.2.4_f25 (NEW_MAP +5) had organic strategic
+    combat (fled Pidgey for type disadvantage, fought others); even
+    V0.2.5_b20's +20 was enough to flip the EV math toward flee.
+
+    V0.2.6 keeps f25's exact reward balance and only ADDS three small
+    signals:
+      MART_PC_BONUS  +10  Mart or PokeCenter first-visit
+      GYM_BONUS      +20  Gym first-visit (Pewter Gym is V1 target)
+      entropy_coef   0.03 (PPO config, not class const) -- between
+                          f25's collapse-prone 0.01 and V0.2.5's
+                          commit-prevention 0.1
+
+    Both bonuses are small enough (relative to +10 BEAT_MON) that they
+    shouldn't flip the optimal strategy away from fighting, but big
+    enough to give a clear gradient toward critical locations.
+
+    Brock's Gym (PEWTER_GYM = 0x36) gets +20 + +5 NEW_MAP = +25 on
+    first visit. That's still less than killing a single trainer
+    (+10 per kill + +20 TRAINER_WIN bonus = +50 for a 3-mon trainer
+    battle), so combat stays the dominant strategy on-route while
+    being weighted by the destination.
+
+    Dialog detection reward (rewarding A-press on NPCs broadly) is
+    deferred to V0.2.7 pending RAM-byte verification.
+    """
+
+    MART_PC_BONUS = 10.0
+    GYM_BONUS = 20.0
+
+    def compute(self, mem: MemoryView) -> float:
+        current_map = rm.map_id(mem)
+        is_new_map = current_map not in self._visited_maps
+        is_mart_or_pc = (
+            current_map in rm.POKECENTER_MAP_IDS
+            or current_map in rm.POKEMART_MAP_IDS
+        )
+        is_gym = current_map in rm.GYM_MAP_IDS
+
+        reward = super().compute(mem)
+
+        if is_new_map:
+            if is_mart_or_pc:
+                reward += self.MART_PC_BONUS
+            if is_gym:
+                reward += self.GYM_BONUS
+
+        return reward
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
@@ -642,6 +697,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_2_5_b20": RewardV0_2_5_b20,
     "RewardV0_2_5_b50": RewardV0_2_5_b50,
     "RewardV0_2_5_b100": RewardV0_2_5_b100,
+    "RewardV0_2_6": RewardV0_2_6,
 }
 
 

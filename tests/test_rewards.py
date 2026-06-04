@@ -570,3 +570,82 @@ def test_v25_pc_heal_low_bumped_to_5():
     # No new map_id since we started here.
     assert abs(got - (r.STEP_PENALTY + r.PC_HEAL_LOW)) < 1e-9
     assert r.PC_HEAL_LOW == 5.0
+
+
+# ---------- RewardV0_2_6 (small Mart/PC + Gym bonuses, restore f25 balance) ----------
+
+from pokerl.env.rewards import RewardV0_2_6
+
+
+def test_v26_inherits_v24_f25_magnitudes():
+    """V0.2.6 must not regress f25's combat balance."""
+    r = RewardV0_2_6
+    assert r.FAINT_PENALTY == -25.0          # from V0.2.4_f25
+    assert r.NEW_MAP_REWARD == 5.0           # from V0.2.2 (unchanged)
+    assert r.BEAT_MON_REWARD == 10.0         # from V0.2.2 (unchanged)
+    assert r.PC_HEAL_LOW == 2.0              # back to V0.2.3 default (V0.2.5 bumped to 5; V0.2.6 restores)
+    assert r.MART_PC_BONUS == 10.0
+    assert r.GYM_BONUS == 20.0
+
+
+def test_v26_mart_first_visit_pays_stacked_bonus():
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_6()
+    r.reset(mem)
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_MART
+    got = r.compute(mem)
+    expected = (
+        r.STEP_PENALTY
+        + r.EXPLORE_REWARD   # +0.3, new (map, x, y)
+        + r.NEW_MAP_REWARD   # +5
+        + r.MART_PC_BONUS    # +10
+    )
+    assert abs(got - expected) < 1e-9
+
+
+def test_v26_pewter_gym_first_visit_pays_gym_bonus():
+    """Brock's gym is the V1 target — first visit pays NEW_MAP + GYM."""
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_6()
+    r.reset(mem)
+    state[rm.ADDR_MAP_ID] = rm.MAP_PEWTER_GYM
+    got = r.compute(mem)
+    expected = (
+        r.STEP_PENALTY
+        + r.EXPLORE_REWARD
+        + r.NEW_MAP_REWARD   # +5
+        + r.GYM_BONUS        # +20
+    )
+    assert abs(got - expected) < 1e-9
+
+
+def test_v26_pc_first_visit_pays_pc_plus_mart_pc_bonus():
+    """PC first-visit: NEW_MAP + MART_PC_BONUS + PC_FIRST_VISIT."""
+    state = base_state(map_id=rm.MAP_PALLET_TOWN, x=8, y=13)
+    _set_party_hp(state, 0, 22, 22)
+    mem = FakeMem(state)
+    r = RewardV0_2_6()
+    r.reset(mem)
+    state[rm.ADDR_MAP_ID] = rm.MAP_VIRIDIAN_POKECENTER
+    got = r.compute(mem)
+    expected = (
+        r.STEP_PENALTY
+        + r.EXPLORE_REWARD
+        + r.NEW_MAP_REWARD   # +5
+        + r.MART_PC_BONUS    # +10
+        + r.PC_FIRST_VISIT   # +5 (inherited V0.2.3)
+    )
+    assert abs(got - expected) < 1e-9
+
+
+def test_v26_gym_and_mart_lists_disjoint():
+    """Gym map_ids must not overlap with Mart/PC ids — otherwise a single
+    map would pay both MART_PC_BONUS and GYM_BONUS, which is a config bug."""
+    assert rm.GYM_MAP_IDS.isdisjoint(rm.POKEMART_MAP_IDS)
+    assert rm.GYM_MAP_IDS.isdisjoint(rm.POKECENTER_MAP_IDS)
+    # And the V1 target is actually in the gym set.
+    assert rm.MAP_PEWTER_GYM in rm.GYM_MAP_IDS
