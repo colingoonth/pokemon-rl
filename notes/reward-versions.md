@@ -291,6 +291,207 @@ Launch on ELSA after V0.2.2 is cancelled (`scancel 14143`).
 
 ---
 
+## V0.2.4 family — faint-magnitude sweep (after V0.2.3 paralysis)
+
+**Files:** `RewardV0_2_4_f25`, `_f50`, `_f100` (each subclasses `RewardV0_2_3`
+and only overrides `FAINT_PENALTY`).
+
+**Why a sweep, not a single magnitude.** Watching V0.2.3 (job 14376
+single-GPU + 14430 DDP, iter 200 each ≈ 1.6M steps each) showed the
+agent never entered a single wild battle. The -250 faint penalty had
+flipped the expected-value math:
+
+  EV(fight) = P(win) × WIN_REWARD + (1 − P(win)) × (LOSE + FAINT)
+            = P(win) × 10 + (1 − P(win)) × (−7 + −250)
+            = 267 × P(win) − 257
+
+For EV(fight) > EV(flee) = −1, you need **P(win) > 96.3%**. Random
+init is nowhere near that. So the policy converges on "flee, accumulate
+exploration reward, never engage." Death spiral: no fights → no battle
+data → policy stays bad at fighting → fights stay scary → still no
+fights.
+
+This was flagged in the V0.2.3 design as a possible failure mode but
+shipped anyway because the upside (kill the blackout exploit) was
+clear. Lesson confirmed empirically: it dominates.
+
+The V0.2.4 sweep tests **three magnitudes simultaneously** to find the
+smallest faint penalty that still dominates per-life exploration gain
+(~+200) without crossing the threshold into death-spiral territory.
+
+| Variant | FAINT_PENALTY | EV-breakeven win% | Predicted behavior |
+|---|---|---|---|
+| f25  | -25  | (32 / 42) = 76% | Engages — uncertainty OK if survival likely |
+| f50  | -50  | (57 / 67) = 85% | Marginal — high confidence required |
+| f100 | -100 | (107 / 117) = 91% | Likely still paralyzes |
+
+Inherits all other V0.2.3 logic (PC heal, blackout guard, new-map,
+catch, trainer-win, etc.). Only the one number changes.
+
+**ELSA runs.** Jobs 14455 (f25), 14456 (f50), 14457 (f100). All three
+launched in parallel as DDP 4×L40S using V0.2.3's DDP scaffold —
+first real use of the multi-GPU infrastructure. Each run gets one
+full L40S node.
+
+**Observed behavior at ~iter 1000-1160 (8-9M steps each):**
+
+| | f25 | f50 | f100 |
+|---|---|---|---|
+| mean_return | +373 | +373 | +424 → +395 |
+| episodes | 2304 | 2112 | 2112 |
+| entropy | 0.3–0.7 oscillating | 0.30 flat | 0.18–0.63 (recent spike) |
+| Fights in watch | **Yes, occasionally** | No | No |
+| Enters buildings | No | No | No |
+
+**Diagnosis.**
+1. **f25 broke the death spiral on combat.** Confirmed by watching
+   `iter_001100.pt`: agent does engage in wild encounters and sometimes
+   wins. Entropy oscillation (0.3–0.7) confirms the policy is still
+   considering alternatives instead of committing.
+2. **f50 and f100 stayed paralyzed.** Same +373 return as f25 but
+   from pure flee-and-explore, not combat. Entropy locked at 0.30
+   (f50) — fully deterministic flee policy. f100's higher +424 is
+   "most polished avoidance" (bigger stick → especially good at
+   staying alive without engaging).
+3. **A new failure mode surfaced even in f25**: the agent that
+   *does* fight still **refuses to enter buildings or interact with
+   NPCs**. Watching f25 iter_1100 showed: walks Route 1 grass, fights
+   wild encounters, but stops dead at every doorway. Never enters
+   Viridian PC / Mart / Forest. Reason inferred: policy learned
+   A-press in the overworld is wasted ticks. Movement reliably pays
+   tile exploration; A on empty tiles is a no-op. Step penalty
+   (-0.001) makes every "wasted" A a small loss. So gradient prunes
+   A out of the overworld action distribution. The policy presses
+   A *only during battles* (context-conditional A, learned from
+   battle-menu reinforcement).
+
+**Lessons recorded.**
+- Reward magnitude isn't just "make the bad thing bad." It shifts
+  the *threshold* policies must clear before they'll attempt the
+  action. -250 was correct for killing the blackout exploit but it
+  also lifted the fight-EV threshold above the random-init policy's
+  reach. The right magnitude has to be small enough that uncertain
+  attempts are still positive-EV at moderate confidence.
+- Parallel sweeps beat sequential single-magnitude runs for catching
+  this kind of regime change. Cost was 3× compute (3 DDP runs in
+  parallel), saved at least 2× wall-clock (we'd have iterated
+  -25 → -50 → -100 sequentially otherwise).
+- A second failure mode hides behind the first. Watching f25 only
+  helped because the engagement-paralysis was solved. Until that
+  unlocked, the building-paralysis was invisible (the agent that
+  wouldn't fight also wouldn't walk into a doorway, but we'd have
+  blamed faint penalty for everything).
+
+**Status:** f25 continues running into 2026-06-04 morning to see how
+far behavior develops; f50 and f100 cancelled at iter ~1060/1160 once
+diagnosed. Documented separately in the late-night session note.
+
+---
+
+## V0.2.5 family — aggressive building / Mart / PC bonuses + entropy bump
+
+**Files:** `RewardV0_2_5` (base, subclasses `RewardV0_2_4_f25`), and
+`RewardV0_2_5_b20`, `_b50`, `_b100` (each overrides `NEW_MAP_REWARD`).
+
+**Why this design.** V0.2.4_f25 unlocked battles but exposed the
+overworld-A-is-wasted-ticks problem: agent won't enter buildings,
+talk to NPCs, or interact with anything that requires A in the
+overworld. For V1 (Brock), the agent MUST:
+1. Walk into Brock's Gym (a building map_id transition)
+2. Press A on Brock to trigger the gym battle
+3. Win the battle (already-learned skill from V0.2.4_f25 evidence)
+
+(1) is a movement action, not an A-press, so a strong enough reward
+for "entered a new building map_id" should solve it. (2) needs the
+A-press-in-overworld habit, which requires a different intervention —
+deferred to V0.2.6.
+
+**Changes from V0.2.4_f25:**
+
+| Signal | V0.2.4_f25 | V0.2.5 |
+|---|---|---|
+| NEW_MAP_REWARD | +5 | **swept: +20 / +50 / +100** |
+| Mart or PC first-visit bonus | (none) | **+20 stacked** on NEW_MAP |
+| PC_HEAL_LOW | +2 | **+5** (heal becomes more attractive) |
+| `entropy_coef` (PPO config) | 0.01 | **0.1** (10× regularization) |
+
+`MART_PC_BONUS` fires once per (map_id, first-visit) when the new
+map's ID is in `POKECENTER_MAP_IDS ∪ POKEMART_MAP_IDS`. Brock's Gym
+is NOT a Mart/PC (its map_id is 0x36), so it only collects the base
+NEW_MAP_REWARD — adding gym map_ids to the bonus list is a clear
+V0.2.6 candidate once V0.2.5's effect is measured.
+
+`POKEMART_MAP_IDS` added to `ram_map.py`: 8 Pokemarts from
+pret/pokered (Viridian + Pewter are V1-critical; Celadon Dept Store
+sub-floors deliberately excluded — they register as their own new
+map_ids and only collect the base reward).
+
+**Reward math at the new weights** (b50 used as example):
+
+| Action | Reward total |
+|---|---|
+| Enter Viridian City (outdoor) | +50 NEW_MAP + +0.3 EXPLORE = +50.3 |
+| Enter Viridian Mart, first time | +50 + +20 MART_PC + +0.3 = +70.3 |
+| Enter Viridian PC, first time, at low HP | +50 + +20 + +5 PC_FIRST + +5 PC_HEAL_LOW = +80.3 |
+| Enter Brock's Gym, first time | +50 NEW_MAP + +0.3 = +50.3 |
+| Beat a wild Pidgey | +10 BEAT_MON (unchanged) |
+| Faint a Pokemon | -25 FAINT_PENALTY (inherited V0.2.4_f25) |
+
+**Why entropy_coef 0.1.** The V0.2.4 sweep showed entropy collapsing
+from 1.94 → 0.30 over ~1000 iters with the PPO default `entropy_coef
+= 0.01`. f50's entropy locked at 0.30 = fully deterministic
+flee-policy. Even f25's entropy was oscillating 0.3–0.7, with the
+0.3 floor suggesting partial commitment. With overnight training
+budget (~5 hours sleep on 48h SLURM jobs ≈ thousands more iters),
+the V0.2.5 runs would otherwise risk the same collapse before any
+building-reward signal had time to take effect. 10× the
+regularization keeps the policy plastic long enough for new building
+visits (which are rare-by-construction) to actually accumulate the
+new gradient signal.
+
+**Risk acknowledged:** if 0.1 is too high, the policy never commits
+and we see flat returns + flat 1.9+ entropy across all three b
+variants in the morning. That's a recoverable failure mode (drop to
+0.05 next run); the asymmetric risk favors over-regularization
+overnight when we can't intervene.
+
+**Why sweep NEW_MAP_REWARD and not Mart/PC bonus or PC_HEAL.** The
+single biggest unknown is how big a building-entry reward needs to
+be to overcome the policy's current "stay in grass, explore tiles
+that pay +0.3" attractor. A full 4096-step episode in grass caps
+around +100 from raw EXPLORE. So:
+- +20 might not be enough to outweigh a worse episode in a building.
+- +50 should clearly dominate a single tile's exploration.
+- +100 is overkill — included to bracket the unknown and check
+  whether the agent over-optimizes for building entries (e.g.
+  refuses to fight on routes because building entries pay so much).
+
+Mart/PC bonus is held at +20 as a fixed "small extra for the things
+that matter for survival." PC_HEAL_LOW bumped to +5 to scale roughly
+with the new building rewards (V0.2.3's +2 was tuned against the
+old +5 NEW_MAP — keeping the same ratio).
+
+**ELSA runs.** Jobs 14511 (b20), 14512 (b50), 14513 (b100). All
+three launched in parallel as DDP 4×L40S alongside the still-running
+V0.2.4_f25 14455 (kept running as a control to see how far the
+V0.2.4_f25 policy develops with more time).
+
+**Hypotheses to test in the morning:**
+1. Does any V0.2.5 variant enter buildings? (Walk into Viridian PC
+   / Mart at any point would be visible in mean_return jumps.)
+2. Does entropy_coef = 0.1 actually keep entropy high, or does
+   the policy commit to a different deterministic strategy anyway?
+3. b20 vs b50 vs b100: is there a meaningful behavioral difference,
+   or do they all hit the same building-entry threshold?
+4. Does Brock's Gym entry ever happen? (Reward signal is only
+   +NEW_MAP_REWARD without the Mart/PC bonus — may need a gym list
+   in V0.2.6.)
+
+**Status:** Running through the night. Next assessment 2026-06-04
+morning.
+
+---
+
 ## Tracker for future versions
 
 | Version | Status | Headline change | Outcome |
@@ -298,6 +499,13 @@ Launch on ELSA after V0.2.2 is cancelled (`scancel 14143`).
 | V0.1 | Cancelled | First attempt | Confounded by env button-hold bug |
 | V0.2 | Cancelled | + movement bonus + battle suite | Entropy collapse to 0 by iter 1100 |
 | V0.2.1 | Cancelled | exploration scaled 3× down | Avoided collapse but exposed flee-as-win exploit |
-| V0.2.2 | Cancelled | flee fix + new-map / catch rewards | Healthy metrics, but blackout-as-free-heal exploit |
-| V0.2.3 | Queued | PC heal rewards + -250 faint + blackout guard | TBD — pending run |
+| V0.2.2 | Cancelled | flee fix + new-map / catch rewards | Healthy metrics but blackout-as-free-heal exploit |
+| V0.2.3 | Cancelled | PC heal rewards + -250 faint + blackout guard | Killed blackout but agent refused to fight (paralysis) |
+| V0.2.4_f25 | Running | -25 faint (relaxed) | Engages in battles but won't enter buildings |
+| V0.2.4_f50 | Cancelled | -50 faint | Same as V0.2.3 — flee-and-explore, entropy collapsed |
+| V0.2.4_f100 | Cancelled | -100 faint | Highest return (most polished avoidance), no fights |
+| V0.2.5_b20 | Running | +20 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | TBD — overnight run |
+| V0.2.5_b50 | Running | +50 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | TBD — overnight run |
+| V0.2.5_b100 | Running | +100 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | TBD — overnight run |
+| V0.2.6 (planned) | — | Dialog-box detection reward + gym map_id bonus | Pending RAM verification |
 | V1.0 | Reserved | First version to clear Brock | — |
