@@ -634,8 +634,180 @@ reward per unique (map_id, x, y) where dialog opens.
    flag sets — this is sparse but might be enough given the high
    entropy. If not, V0.2.7 dialog reward is the fix.)
 
-**Status:** Single DDP run (no sweep — design is tighter this
-iteration). Launching 2026-06-04 morning.
+**ELSA run.** Job 15929. DDP 4×L40S on gpu-node019. Ran ~1 hour
+(~19M steps, iter 2302) before being cancelled in favor of V0.2.7.
+
+**Observed at iter 2302:**
+
+| | V0.2.6 |
+|---|---|
+| mean_return | +370 |
+| episodes | 4576 |
+| tiles | 26108 |
+| entropy | **0.75** |
+
+The entropy landing at 0.75 is exactly the predicted 0.5-0.8 sweet
+spot — `entropy_coef = 0.03` worked structurally as intended. So
+the V0.2.5 "too-random" failure mode is solved by going to 0.03.
+
+**Diagnosis.** Watching iter_002300 showed the policy is **still
+fleeing every wild battle**. The +10/+20 Mart/PC/Gym bonuses
+weren't large enough to swing combat EV — they shouldn't have been,
+because they only fire on first-visit per location, which is rare.
+The actual problem is upstream: V0.2.6 inherits V0.2.4_f25's
+`BEAT_MON = +10`, which sets the fight-EV breakeven at **74% win
+confidence** (`P × 10 + (1-P) × (-7 + -25) > -1 → P > 31/42`). A
+partially-trained policy isn't anywhere near 74% on most encounters.
+
+Caveat: f25 itself didn't show strategic combat until ~155M steps.
+V0.2.6 at 19M is genuinely too early to declare it broken. But:
+- The breakeven math is structural and won't improve with more time
+- Iterating the design is cheaper than waiting 8× longer to confirm
+- V0.2.7's combat bump is independent improvement either way
+
+**Lesson recorded.**
+- **f25's +10 BEAT_MON was tuned for a fully-trained policy.** It
+  forms a stable equilibrium at high win confidence but provides
+  no gradient toward fighting from a low-confidence starting point.
+  Early-policy combat needs lower breakeven thresholds.
+- **First-visit bonuses are too sparse to affect overall strategy.**
+  Mart/PC/Gym +10/+20 stays in the noise compared to per-fight EV.
+- **Watch + iterate beats wait + hope.** Cheaper to cancel at 19M
+  and ship a better hypothesis than burn 130M more samples on a
+  policy that the math says won't converge to combat.
+
+**Status:** Cancelled mid-morning 2026-06-04, replaced by V0.2.7.
+
+---
+
+## V0.2.7 — combat reward bump (lower the fight-EV threshold)
+
+**File:** `RewardV0_2_7` (subclasses `RewardV0_2_6`).
+
+**Why this design.** V0.2.6 still produced flee-everything because
+the underlying f25 `BEAT_MON = +10` makes uncertain battles
+negative-EV. The fix is direct: bump combat rewards so the fight
+threshold is reachable from a partially-trained policy.
+
+**Changes from V0.2.6:**
+
+| Signal | V0.2.6 | V0.2.7 | Breakeven win % |
+|---|---|---|---|
+| BEAT_MON_REWARD | +10 | **+20** | 74% → 60% |
+| TRAINER_WIN_BONUS | +20 | **+30** | (Route 2 trainers are V1 critical path) |
+
+Everything else inherited unchanged: FAINT -25, NEW_MAP +5,
+MART_PC_BONUS +10, GYM_BONUS +20, PC heal logic, blackout guard,
+`entropy_coef` 0.03.
+
+**EV math at the new BEAT_MON.** With BEAT_MON +20, FAINT -25,
+LOSE -7:
+
+  EV(fight) = P × 20 + (1−P) × (−32) = 52P − 32
+  EV(fight) > EV(flee = −1):  P > 31/52 = 59.6%
+
+60% win confidence is reachable from a few wild-battle samples
+where the agent has Bulbasaur grass-attacks at level 5-6 (super
+effective against the common Pidgey/Rattata/Caterpie distribution
+on Route 1). The agent doesn't need to be good — just slightly
+better than coin-flip.
+
+**Reward math comparison** (cumulative through V0.2.7):
+
+| Action | V0.2.4_f25 | V0.2.6 | V0.2.7 |
+|---|---|---|---|
+| Beat wild Pidgey | +10 | +10 | **+20** |
+| 3-mon trainer battle win | +50 | +50 | **+90** |
+| Faint a Pokemon | -25 | -25 | -25 |
+| Enter Pewter Gym, first time | +5 | +25 | +25 |
+
+A 3-mon trainer win (+90) is now equivalent to **3.6× a Pewter Gym
+discovery**. Combat is the dominant reward source again, which is
+the goal: the agent should be playing Pokemon, not playing
+geography.
+
+**Naming clarification.** V0.2.7 was originally penciled for
+dialog-detection reward. That's now V0.2.8, still pending
+RAM-byte verification.
+
+**Status:** Single DDP run launched 2026-06-04 ~12:00 PM as job
+16185 on gpu-node019. Cooking.
+
+**Hypotheses to test:**
+1. Does the agent fight more wild battles? (Watch action
+   distribution: FIGHT vs RUN ratio in battle menus.)
+2. Does the agent pursue trainers? (TRAINER_WIN_BONUS bump should
+   pull policy toward visible-trainer maps like Route 2.)
+3. Does the agent reach Pewter / Brock's Gym? (Combat-grind path
+   should now align with the geography reward signals.)
+4. Does V0.2.7 preserve the entropy ~0.75 we saw in V0.2.6?
+
+---
+
+## Cross-cutting design patterns learned (writeup source)
+
+These are the meta-lessons that should make it into the eventual
+portfolio writeup, beyond per-version detail:
+
+1. **Reward loopholes are inevitable; iteration is the protocol.**
+   Every V0.2.x has shipped with an exploit or failure mode that
+   wasn't visible in the design but was obvious from watching the
+   trained policy. Sequence: V0.2.1 flee-as-win, V0.2.2
+   blackout-as-free-heal, V0.2.3 fight-paralysis, V0.2.4_f25
+   A-press-is-wasted, V0.2.5 flee-to-explore, V0.2.6 still-flees.
+   **Plan to iterate; don't try to design a complete reward
+   upfront.**
+
+2. **EV math at the random-init confidence level is the right
+   sanity check.** Most failure modes in this project were
+   predictable from the EV table BEFORE training started:
+   - V0.2.3 -250 faint → fight breakeven at 96% confidence
+     (impossible for random init)
+   - V0.2.4_f25 +10 BEAT_MON → 74% (high; needed 155M steps)
+   - V0.2.7 +20 BEAT_MON → 60% (reachable with type advantage)
+   Running this math during design surfaces structural problems
+   before compute is committed.
+
+3. **Bonus magnitudes implicitly re-rank ALL behaviors.** Adding
+   a +20 reward for behavior X means every other behavior is now
+   ~+20 less attractive in opportunity cost. V0.2.5's lesson:
+   even a +20 NEW_MAP bonus was enough to make flee-to-explore
+   beat fight-for-XP. Always design bonuses as small additions
+   on top of a working balance, not as dominant terms.
+
+4. **PPO entropy regularization is a global average, not a
+   per-context floor.** Increasing `entropy_coef` keeps
+   weakly-rewarded states stochastic but doesn't prevent
+   strong-gradient contexts from committing. V0.2.5's lesson:
+   the policy fled all battles even with entropy_coef=0.1
+   because the flee reward gradient was strong; only overworld
+   movement stayed random.
+
+5. **Watching > metrics for diagnostic.** Almost every diagnosis
+   in this project came from watching the trained policy in the
+   SDL2 window, not from looking at mean_return / entropy / etc.
+   Returns rose monotonically in every variant; only watching
+   revealed which variants were actually learning the V1 critical
+   path. **The metrics CSV is the trail; the watch is the
+   ground truth.**
+
+6. **Parallel sweeps beat sequential single-magnitude runs.** The
+   V0.2.4 (f25/f50/f100) and V0.2.5 (b20/b50/b100) sweeps caught
+   regime changes (where the optimal strategy flips) in 1× the
+   wall-clock that sequential would have taken. Cost: 3× the
+   compute. Worth it for any question shaped "which magnitude
+   range crosses the threshold."
+
+7. **Multi-agent parallel review pre-implementation caught 8+
+   bugs in the DDP code BEFORE writing.** The reviewer subagent
+   pattern (2 parallel researchers reviewing the plan from
+   different angles, third agent code-reviewing the implementation)
+   produced concrete fixes that would have been silent failures
+   otherwise: AsyncVectorEnv context="spawn" requirement, OMP env
+   vars before torch import, modern NCCL var name, single
+   srun--ntasks=1 to avoid the double-launch hang, NCCL warmup,
+   teardown order. Adopt this pattern for any non-trivial new
+   infrastructure.
 
 ---
 
@@ -648,12 +820,13 @@ iteration). Launching 2026-06-04 morning.
 | V0.2.1 | Cancelled | exploration scaled 3× down | Avoided collapse but exposed flee-as-win exploit |
 | V0.2.2 | Cancelled | flee fix + new-map / catch rewards | Healthy metrics but blackout-as-free-heal exploit |
 | V0.2.3 | Cancelled | PC heal rewards + -250 faint + blackout guard | Killed blackout but agent refused to fight (paralysis) |
-| V0.2.4_f25 | Cancelled (kept overnight) | -25 faint (relaxed) | Engages strategically, enters buildings for tiles, no NPC interaction |
+| V0.2.4_f25 | Cancelled | -25 faint (relaxed) | Engages strategically (155M steps), enters buildings for tiles, no NPC interaction |
 | V0.2.4_f50 | Cancelled | -50 faint | Flee-and-explore, entropy collapsed |
 | V0.2.4_f100 | Cancelled | -100 faint | Highest return from "polished avoidance," no fights |
-| V0.2.5_b20 | Cancelled | +20 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | Random-walks, flees all fights, but DID interact with NPC accidentally |
-| V0.2.5_b50 | Cancelled | +50 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | Same as b20, slightly higher returns from more map jackpots |
-| V0.2.5_b100 | Cancelled | +100 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | Most "polished avoidance," only 1841 tiles |
-| V0.2.6 | Launching | f25 balance + small Mart/PC +10 + Gym +20 + entropy 0.03 | TBD |
-| V0.2.7 (planned) | — | + dialog detection reward per unique (map, x, y) | Pending RAM verification |
+| V0.2.5_b20 | Cancelled | +20 NEW_MAP + Mart/PC stack + entropy_coef 0.1 | Random-walks, flees all fights, DID interact with NPC accidentally (no reward fired) |
+| V0.2.5_b50 | Cancelled | +50 NEW_MAP + Mart/PC stack | Same as b20, slightly higher returns from map jackpots |
+| V0.2.5_b100 | Cancelled | +100 NEW_MAP + Mart/PC stack | "Polished avoidance," only 1841 tiles, agent stuck in few rooms |
+| V0.2.6 | Cancelled | f25 balance + Mart/PC +10 + Gym +20 + entropy 0.03 | entropy landed at 0.75 (perfect); still flees all wild battles (BEAT_MON +10 EV breakeven 74%) |
+| V0.2.7 | Running | + BEAT_MON +20 + TRAINER_WIN +30 | TBD (job 16185) |
+| V0.2.8 (planned) | — | + dialog detection reward per unique (map, x, y) | Pending RAM verification |
 | V1.0 | Reserved | First version to clear Brock | — |
