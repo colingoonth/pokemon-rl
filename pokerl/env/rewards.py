@@ -725,6 +725,40 @@ class RewardV0_3_1(RewardV0_2_7):
     FLEE_PENALTY = -5.0     # was -1 in V0.2.2-V0.2.7
 
 
+class RewardV0_3_2_h10(RewardV0_3_1):
+    """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
+    h-sweep). Smallest measurable change from V0.3.1; tests whether
+    a 2x bump is enough to teach healing without distorting the rest
+    of the reward landscape.
+    """
+    PC_HEAL_LOW = 10.0
+
+
+class RewardV0_3_2_h25(RewardV0_3_1):
+    """V0.3.1 + PC_HEAL_LOW bumped 5 -> 25 (mid-low arm of the
+    h-sweep). Heal value matches BEAT_MON (+20) on the same order
+    of magnitude; one nurse heal is worth ~one wild kill.
+    """
+    PC_HEAL_LOW = 25.0
+
+
+class RewardV0_3_2_h35(RewardV0_3_1):
+    """V0.3.1 + PC_HEAL_LOW bumped 5 -> 35 (mid-high arm of the
+    h-sweep). Sits at the low end of the math-driven recommended
+    range (+35-45) from the EV derivation.
+    """
+    PC_HEAL_LOW = 35.0
+
+
+class RewardV0_3_2_h50(RewardV0_3_1):
+    """V0.3.1 + PC_HEAL_LOW bumped 5 -> 50 (aggressive arm of the
+    h-sweep). 10x bump, in line with the BEAT_MON progression
+    (2 -> 10 -> 20). Tests whether overshooting buys cleaner
+    discovery of the heal chain at the cost of possible PC loops.
+    """
+    PC_HEAL_LOW = 50.0
+
+
 REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_1": RewardV0_1,
     "RewardV0_2": RewardV0_2,
@@ -740,6 +774,10 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_2_6": RewardV0_2_6,
     "RewardV0_2_7": RewardV0_2_7,
     "RewardV0_3_1": RewardV0_3_1,
+    "RewardV0_3_2_h10": RewardV0_3_2_h10,
+    "RewardV0_3_2_h25": RewardV0_3_2_h25,
+    "RewardV0_3_2_h35": RewardV0_3_2_h35,
+    "RewardV0_3_2_h50": RewardV0_3_2_h50,
 }
 
 
