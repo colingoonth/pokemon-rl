@@ -53,6 +53,7 @@ class PPOConfig:
     async_envs: bool = False      # multi-process envs to escape the GIL
     save_every: int = 100         # iterations between intermediate checkpoints; 0 disables
     reward_class: str = "RewardV0_2"  # which Reward subclass make_vec_env should instantiate
+    state_path: str | None = None  # optional env start-state override; None = env default
 
 
 @dataclass

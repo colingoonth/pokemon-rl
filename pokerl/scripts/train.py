@@ -93,6 +93,7 @@ def main() -> None:
     def env_fn():
         return make_vec_env(
             n_envs=n_envs_per_rank,
+            state_path=cfg.state_path,
             headless=True,
             max_steps=4096,
             frame_stack=4,
