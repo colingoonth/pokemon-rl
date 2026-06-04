@@ -37,9 +37,10 @@ def parse_args() -> argparse.Namespace:
                    help="Run headless and dump a gif instead of opening a window")
     p.add_argument("--deterministic", action="store_true",
                    help="Use argmax actions instead of sampling")
-    p.add_argument("--speed", type=float, default=1.0,
+    p.add_argument("--speed", type=float, default=0.0,
                    help="Emulation speed multiplier in SDL2 mode "
-                        "(1.0=real time, 5.0=5x, 0=unbounded). Ignored when --record.")
+                        "(1.0=real time, 5.0=5x, 0=unbounded — default). "
+                        "Ignored when --record.")
     return p.parse_args()
 
 
