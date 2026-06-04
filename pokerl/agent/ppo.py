@@ -276,8 +276,9 @@ def train(
         sps = (cfg.n_steps * n_envs) / iter_dt if iter_dt > 0 else 0.0
 
         if iteration % cfg.log_every == 0:
+            ts = time.strftime("%H:%M:%S")
             print(
-                f"iter {iteration:4d}  step {global_step:7d}  "
+                f"[{ts}] iter {iteration:4d}  step {global_step:7d}  "
                 f"mean_return(last20) {mean_ret:+.3f}  "
                 f"episodes {episode_count:4d}  "
                 f"tiles(all_envs) {unique_tiles_total:5d}  "
