@@ -14,7 +14,7 @@ import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv, VectorEnv
 
 from pokerl.env.pokemon_red_env import PokemonRedEnv
-from pokerl.env.rewards import Reward, RewardV1
+from pokerl.env.rewards import Reward, RewardV0_1
 from pokerl.env.wrappers import FrameStack
 
 
@@ -44,7 +44,7 @@ def make_vec_env(
     headless: bool = True,
     max_steps: int = 4096,
     frame_stack: int = 4,
-    reward_cls: Callable[[], Reward] = RewardV1,
+    reward_cls: Callable[[], Reward] = RewardV0_1,
     async_envs: bool = False,
 ) -> VectorEnv:
     """Construct a vectorized env with `n_envs` parallel PokemonRed instances.

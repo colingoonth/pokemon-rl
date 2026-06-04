@@ -101,7 +101,7 @@ formal about RL, my gut said "catching pokemon or beating trainers...
 and maybe discovering new areas." That instinct turned out to map
 almost exactly onto how Whidden and similar projects design their
 reward functions: exploration + combat progress + story milestones.
-RewardV1 codifies those categories with these starting weights:
+RewardV0_1 codifies those categories with these starting weights:
 
 | Signal | Weight | Reasoning |
 |---|---|---|
@@ -235,12 +235,12 @@ in tomorrow's metrics, and what each outcome implies:
 - **Most likely case**: entropy slowly drops but tiles barely move
   because the agent learns one degenerate strategy (probably
   button-mashing at spawn). This is the expected V1 failure mode and
-  motivates RewardV2.
+  motivates RewardV0_2.
 - **Worst case**: training diverges (NaN losses, entropy collapses to
   0, episodes complete instantly because the agent picks 'A' forever
   in a menu). Would imply a real bug, not a reward-design problem.
 
-#### RewardV2 hypotheses (to design once we see V1's actual failure mode):
+#### RewardV0_2 hypotheses (to design once we see V1's actual failure mode):
 
 1. **Diminishing exploration reward**: instead of +1 per new tile flat,
    decay the reward for visiting tiles near already-visited regions.

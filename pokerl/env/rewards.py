@@ -23,7 +23,7 @@ class Reward(Protocol):
     def compute(self, mem: MemoryView) -> float: ...
 
 
-class RewardV1:
+class RewardV0_1:
     """First reward version: exploration + levels + flags + badges - step penalty.
 
     Tuned weights:
@@ -97,7 +97,7 @@ class RewardV1:
         return len(self._visited)
 
 
-class RewardV2:
+class RewardV0_2:
     """V1 + movement bonus + battle-aware rewards.
 
     V1 failed because the agent learned to never press movement buttons.
@@ -256,7 +256,7 @@ class RewardV2:
         return len(self._visited)
 
 
-class RewardV2_1(RewardV2):
+class RewardV0_2_1(RewardV0_2):
     """V2 with exploration rewards scaled down to relatively-boost combat.
 
     V2's first ELSA run showed +700 returns dominated by exploration
@@ -271,9 +271,9 @@ class RewardV2_1(RewardV2):
 
 
 REWARD_REGISTRY: dict[str, type] = {
-    "RewardV1": RewardV1,
-    "RewardV2": RewardV2,
-    "RewardV2_1": RewardV2_1,
+    "RewardV0_1": RewardV0_1,
+    "RewardV0_2": RewardV0_2,
+    "RewardV0_2_1": RewardV0_2_1,
 }
 
 

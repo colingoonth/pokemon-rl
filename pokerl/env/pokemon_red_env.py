@@ -15,7 +15,7 @@ import numpy as np
 from gymnasium import spaces
 from pyboy import PyBoy
 
-from pokerl.env.rewards import Reward, RewardV1
+from pokerl.env.rewards import Reward, RewardV0_1
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROM = ROOT / "roms" / "pokemon_red.gb"
@@ -55,7 +55,7 @@ class PokemonRedEnv(gym.Env):
         self.rom_path = Path(rom_path)
         self.state_path = Path(state_path)
         self.max_steps = max_steps
-        self.reward_fn: Reward = reward if reward is not None else RewardV1()
+        self.reward_fn: Reward = reward if reward is not None else RewardV0_1()
 
         if not self.rom_path.exists():
             raise FileNotFoundError(f"ROM not found: {self.rom_path}")

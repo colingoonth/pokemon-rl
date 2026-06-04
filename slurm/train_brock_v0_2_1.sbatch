@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=pokerl-brock-v2-1
-#SBATCH --output=/scratch/guenthc1/pokemon-rl/runs/brock_v2_1_%j/train.out
-#SBATCH --error=/scratch/guenthc1/pokemon-rl/runs/brock_v2_1_%j/train.err
+#SBATCH --job-name=pokerl-brock-v0-2-1
+#SBATCH --output=/scratch/guenthc1/pokemon-rl/runs/brock_v0_2_1_%j/train.out
+#SBATCH --error=/scratch/guenthc1/pokemon-rl/runs/brock_v0_2_1_%j/train.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=l40s
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-RUN_DIR="/scratch/guenthc1/pokemon-rl/runs/brock_v2_1_${SLURM_JOB_ID}"
+RUN_DIR="/scratch/guenthc1/pokemon-rl/runs/brock_v0_2_1_${SLURM_JOB_ID}"
 mkdir -p "${RUN_DIR}"
 
 cd "/scratch/guenthc1/pokemon-rl"
@@ -25,6 +25,6 @@ echo "Workdir: $(pwd)"
 echo "Outputs: ${RUN_DIR}"
 echo
 
-uv run python -m pokerl.scripts.train --config configs/elsa_brock_v2_1.yaml
+uv run python -m pokerl.scripts.train --config configs/elsa_brock_v0_2_1.yaml
 
 echo "=== Done $(date) ==="

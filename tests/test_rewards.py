@@ -1,4 +1,4 @@
-"""Unit tests for RewardV1 using a dict-backed fake memory.
+"""Unit tests for RewardV0_1 using a dict-backed fake memory.
 
 These tests don't need PyBoy or the ROM — they verify reward bookkeeping
 in isolation. RAM-map address correctness is covered by test_ram_map.
@@ -6,7 +6,7 @@ in isolation. RAM-map address correctness is covered by test_ram_map.
 from __future__ import annotations
 
 from pokerl.env import ram_map as rm
-from pokerl.env.rewards import RewardV1
+from pokerl.env.rewards import RewardV0_1
 
 
 class FakeMem:
@@ -43,7 +43,7 @@ def base_state(
 
 def test_first_step_is_just_step_penalty():
     mem = FakeMem(base_state())
-    r = RewardV1()
+    r = RewardV0_1()
     r.reset(mem)
     # No state changed -> only the step penalty fires
     assert r.compute(mem) == r.STEP_PENALTY
@@ -52,7 +52,7 @@ def test_first_step_is_just_step_penalty():
 def test_new_tile_pays_exploration_reward():
     state = base_state(x=8, y=13)
     mem = FakeMem(state)
-    r = RewardV1()
+    r = RewardV0_1()
     r.reset(mem)
 
     # Move to a new tile
@@ -68,7 +68,7 @@ def test_new_tile_pays_exploration_reward():
 def test_level_up_pays_per_level():
     state = base_state(level=6)
     mem = FakeMem(state)
-    r = RewardV1()
+    r = RewardV0_1()
     r.reset(mem)
 
     # Gain 2 levels in one step (e.g., big EXP gain)
@@ -80,7 +80,7 @@ def test_level_up_pays_per_level():
 def test_badge_pays_per_badge():
     state = base_state(badges=0)
     mem = FakeMem(state)
-    r = RewardV1()
+    r = RewardV0_1()
     r.reset(mem)
 
     # Earn Brock badge (bit 0)
@@ -96,7 +96,7 @@ def test_baselines_prevent_paying_for_initial_state():
     state = base_state(level=30, badges=0b0000_0111)
     state[rm.ADDR_EVENT_FLAGS_START] = 0xFF  # 8 flags already set
     mem = FakeMem(state)
-    r = RewardV1()
+    r = RewardV0_1()
     r.reset(mem)
     assert r.compute(mem) == r.STEP_PENALTY
 
@@ -104,7 +104,7 @@ def test_baselines_prevent_paying_for_initial_state():
 def test_unique_tiles_visited_tracks_set_size():
     state = base_state(x=8, y=13)
     mem = FakeMem(state)
-    r = RewardV1()
+    r = RewardV0_1()
     r.reset(mem)
     assert r.unique_tiles_visited == 1  # seeded with start tile
 
@@ -115,9 +115,9 @@ def test_unique_tiles_visited_tracks_set_size():
     assert r.unique_tiles_visited == 3
 
 
-# ---------- RewardV2 ----------
+# ---------- RewardV0_2 ----------
 
-from pokerl.env.rewards import RewardV2
+from pokerl.env.rewards import RewardV0_2
 
 
 def _set_party_hp(state: dict[int, int], slot: int, cur: int, mx: int) -> None:
@@ -131,7 +131,7 @@ def _set_party_hp(state: dict[int, int], slot: int, cur: int, mx: int) -> None:
 def test_v2_move_bonus_for_revisiting():
     state = base_state(x=8, y=13)
     mem = FakeMem(state)
-    r = RewardV2()
+    r = RewardV0_2()
     r.reset(mem)
 
     # Move to new tile -> +1
@@ -147,7 +147,7 @@ def test_v2_no_move_bonus_in_battle():
     state = base_state(x=8, y=13)
     _set_party_hp(state, 0, 20, 22)
     mem = FakeMem(state)
-    r = RewardV2()
+    r = RewardV0_2()
     r.reset(mem)
 
     # Enter battle; position locked
@@ -168,7 +168,7 @@ def test_v2_beat_mon_reward():
     state[rm.ADDR_ENEMY_MON_HP] = 0
     state[rm.ADDR_ENEMY_MON_HP + 1] = 30
     mem = FakeMem(state)
-    r = RewardV2()
+    r = RewardV0_2()
     r.reset(mem)
 
     # First in-battle compute pays NEW_ENCOUNTER and seeds enemy HP=30
@@ -188,7 +188,7 @@ def test_v2_win_battle():
     state[rm.ADDR_ENEMY_MON_HP] = 0
     state[rm.ADDR_ENEMY_MON_HP + 1] = 30
     mem = FakeMem(state)
-    r = RewardV2()
+    r = RewardV0_2()
     r.reset(mem)
     r.compute(mem)  # enter battle
 
@@ -206,7 +206,7 @@ def test_v2_lose_battle():
     state[rm.ADDR_ENEMY_MON_HP] = 0
     state[rm.ADDR_ENEMY_MON_HP + 1] = 30
     mem = FakeMem(state)
-    r = RewardV2()
+    r = RewardV0_2()
     r.reset(mem)
     r.compute(mem)  # enter
 
@@ -223,7 +223,7 @@ def test_v2_new_encounter_no_repeat():
     state = base_state(x=8, y=13)
     _set_party_hp(state, 0, 20, 22)
     mem = FakeMem(state)
-    r = RewardV2()
+    r = RewardV0_2()
     r.reset(mem)
 
     # First Pidgey encounter
@@ -247,7 +247,7 @@ def test_v2_level_up_pays_three():
     state = base_state(level=6)
     _set_party_hp(state, 0, 20, 22)
     mem = FakeMem(state)
-    r = RewardV2()
+    r = RewardV0_2()
     r.reset(mem)
 
     state[rm.ADDR_PARTY_MON_BASE + rm.PMON_OFFSET_LEVEL] = 8
