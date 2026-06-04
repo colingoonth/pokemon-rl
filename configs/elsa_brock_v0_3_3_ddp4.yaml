@@ -1,0 +1,30 @@
+# V0.3.3: V0.3.1 + quadratic HP-restored heal reward.
+# Replaces the threshold PC_HEAL_LOW/FULL bonuses with a continuous
+# (delta_hp_frac)^2 * 12 reward fired on every step HP rises. Auto-
+# scales: full heal from 10% pays +9.7, from 90% pays +0.12. Fires
+# anywhere HP recovers (potion, nurse) — no need to hand-flag heal
+# events.
+#
+# entropy_coef dropped to 0.002 (was 0.03) per Colin's call — more
+# decisive policy commitment given the denser, less-discrete heal
+# signal. Watch H closely; if it crashes to <0.3 inside 50 iters
+# the bump was too aggressive and we revert.
+run_name: elsa_brock_v0_3_3_ddp4
+state_path: states/blue_fight.state
+total_timesteps: 200_000_000
+n_envs: 32
+n_steps: 256
+n_epochs: 4
+minibatch_size: 512
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.002
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_3_3

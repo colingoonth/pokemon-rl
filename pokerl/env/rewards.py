@@ -725,6 +725,63 @@ class RewardV0_3_1(RewardV0_2_7):
     FLEE_PENALTY = -5.0     # was -1 in V0.2.2-V0.2.7
 
 
+class RewardV0_3_3(RewardV0_3_1):
+    """V0.3.1 + quadratic HP-restored heal reward; disables threshold PC_HEAL_*.
+
+    Replaces the discrete PC_HEAL_LOW / PC_HEAL_FULL bonuses (which only
+    fire on transition-to-full at a PokeCenter) with a continuous signal:
+    every step where party HP fraction increases, reward
+        (delta_hp_frac)^2 * HEAL_QUAD_COEF
+    Auto-scales: full heal from 10% HP pays ~0.81 * 12 = +9.7, full heal
+    from 90% HP pays ~0.01 * 12 = +0.12. No magnitude knob to guess; the
+    severity of the heal sets the size of the reward.
+
+    Inspired by Whidden's PokemonRedExperiments v2 reward shape (uses
+    coef 10); we use 12 here for slightly stronger pull. The quadratic
+    fires anywhere HP rises — potion use mid-battle, nurse heal at PC,
+    Pokemon Centers in subsequent cities — without us having to hand-
+    define "heal events."
+
+    Blackout force-heal is still suppressed via the existing
+    _blackout_pending guard (snapshot before super() clears it).
+
+    Inherits everything else from V0.3.1.
+    """
+
+    PC_HEAL_LOW = 0.0       # disabled — superseded by quadratic term
+    PC_HEAL_FULL = 0.0      # disabled
+    HEAL_QUAD_COEF = 12.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_hp_frac = 0.0
+
+    def reset(self, mem: MemoryView) -> None:
+        super().reset(mem)
+        party_hp = rm.party_hp(mem)
+        cur = sum(c for c, _m in party_hp)
+        mx = sum(m for _c, m in party_hp)
+        self._last_hp_frac = (cur / mx) if mx > 0 else 0.0
+
+    def compute(self, mem: MemoryView) -> float:
+        # Snapshot blackout flag before super().compute() clears it via the
+        # V0.2.3 PC heal/visit guard. Without this snapshot, blackout force-
+        # heals (0 -> full HP) would pay the quadratic reward.
+        was_blackout_pending = self._blackout_pending
+
+        reward = super().compute(mem)
+
+        party_hp = rm.party_hp(mem)
+        cur = sum(c for c, _m in party_hp)
+        mx = sum(m for _c, m in party_hp)
+        hp_frac = (cur / mx) if mx > 0 else 0.0
+        delta = max(0.0, hp_frac - self._last_hp_frac)
+        if delta > 0 and self.HEAL_QUAD_COEF > 0 and not was_blackout_pending:
+            reward += (delta ** 2) * self.HEAL_QUAD_COEF
+        self._last_hp_frac = hp_frac
+        return reward
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -774,6 +831,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_2_6": RewardV0_2_6,
     "RewardV0_2_7": RewardV0_2_7,
     "RewardV0_3_1": RewardV0_3_1,
+    "RewardV0_3_3": RewardV0_3_3,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,
