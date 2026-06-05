@@ -516,7 +516,53 @@ formula in V0.4 has a curve I looked at and a magnitude I checked
 against the others. Constants weren't guessed; they came out of
 the comparison. That's the thing the V0.3.x line was missing.
 
-The philosophy:
+### The bigger lesson
+
+Beyond the specific design pivot, the V0.3.x → V0.4 transition
+forced a meta-realization I should keep in front of me for the
+rest of this project:
+
+**Adding rewards to map direct behavior is wrong, and this
+project is way less simple than my approach allowed.**
+
+I was treating Pokemon Red RL as a hyperparameter sweep. Pick a
+behavior I want, write a reward for it, tune the magnitude until
+the agent does the thing. Five reward versions in (V0.2.2 →
+V0.2.7 → V0.3.0 → V0.3.1 → V0.3.2 → V0.3.3), all that approach
+produced was a stack of behavior-shaping knobs that each fixed
+one corner case and created the next. Bump BEAT_MON to teach
+fighting → agent never flees. Bump FLEE_PENALTY to fix that →
+agent fights until it dies. Bump healing reward to fix *that* →
+agent never finds the heal chain because it's too far away to
+discover.
+
+The pattern: every "fix" was me encoding more of the game's
+strategy into the reward function. The agent never got the
+chance to discover anything; it was being told.
+
+The actual problem isn't "what's the right magnitude for
+BEAT_MON" — it's "what reward landscape allows the agent to
+discover correct behavior on its own." That's a fundamentally
+harder design problem than the one I'd been solving for two
+days. It needs curves, not constants. It needs structure, not
+knobs. It needs me to leave room for the agent to learn the
+game, not to encode the game into the rewards.
+
+That's the thing I'd been resisting, probably because the
+knob-turning route was tactile and produced visible iteration
+per day. Stepping back and admitting "this is harder than I was
+treating it" cost me an evening of training-time and gave me
+nothing immediately to ship. But it's the only way forward that
+doesn't end with a sixteen-knob reward function that ships a
+brittle, hand-coded policy.
+
+The discipline I want to hold for the rest of this project:
+**when I notice myself adding a new reward constant to fix a
+specific failure mode, stop and ask whether the right move is
+restructuring the reward landscape instead.** Knob-turning was
+the wrong tool for V0.3. It will be the wrong tool again.
+
+### The philosophy in V0.4 design:
 1. **Remove dense per-action rewards** like BEAT_MON +20. Replace
    with a capped, falling log over per-area kills so the agent
    can't grind a single route. Combat becomes instrumental, not
