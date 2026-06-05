@@ -702,3 +702,186 @@ Class is named `RewardV0_3_4` in code (since it was built before
 the V0.4 rename). Kept as the actual class for the running jobs;
 added `RewardV0_4_0 = RewardV0_3_4` alias going forward so new
 configs use the conceptually-correct version label.
+
+## 2026-06-05 — Day 4: V0.4 Tail Whip diagnosis + V0.4.1 fix
+
+### Where the day started
+
+Yesterday's V0.4 launched two parallel jobs: 17439 (baseline,
+entropy 0.01) and 17440 (eager, entropy 0.005). By morning 17439
+was dead — PyBoy `PyBoyAssertException: No data` from `BaseMBC.load_ram`
+at startup. Then NCCL timed out waiting for rank 0 and SIGTERM
+cascaded across the DDP group.
+
+17440 was still running fine — won its race, kept going.
+
+### The PyBoy NFS race
+
+Root cause: PyBoy auto-creates a `<rom>.gb.ram` companion file to
+persist save-RAM. With 24 PyBoy subprocesses per rank × 2 jobs all
+racing for the same `/scratch/.../roms/pokemon_red.gb.ram` over NFS
+at startup, one of them got a partial read and crashed. 17440 won
+its race by luck; 17439 lost.
+
+Fix: pass `ram_file=BytesIO(b"\x00" * 32768)` (Pokemon Red MBC3 has
+32KB battery-backed save RAM). Each env subprocess gets its own
+in-memory buffer, no disk contention at all. Note: empty `BytesIO()`
+does NOT work — PyBoy's `load_ram` reads the cart-RAM size during
+init and raises "No data" on short read. Pre-sized zero buffer is
+required.
+
+Resubmitted as 17653. Boots clean, race eliminated.
+
+### Watching V0.4 eager at iter 5000
+
+17440 (eager, entropy 0.005) hit iter 5000 at +158 mean_return with
+H ~0.95. Watched a checkpoint via watch.py with `--state-path
+states/blue_fight.state`.
+
+Result: **agent is spamming Tail Whip until it dies.**
+
+Specifically:
+- Against Blue rival: won by Tackling
+- After Blue, almost every wild battle: Tail Whip until faint
+- One exception: a single wild battle won with Tackle by chance
+- Behavior outside battle: heads straight to the grass on Route 1
+
+So the overworld policy is *working* — agent goes seeking
+encounters, exploring the curve-shaped EXPLORE reward. The
+in-battle policy is broken — Tail Whip-locked.
+
+### How does it earn +158 if it's Tail Whip spamming?
+
+This was the question that cracked the diagnosis open. The +158
+isn't from combat — it's from post-Blue exploration. The Blue
+rival fight gives TRAINER_WIN_BONUS +10 + falling-log first-kill
+~+2. After winning, the agent walks Pallet → Route 1 → grass,
+accumulating ~50-200 of EXPLORE reward per episode (depending
+on tiles covered). Wild battles after that lose at -25 each, but
+the explore reward dominates the mean across 24 envs.
+
+Bimodal distribution per episode:
+- "Won Blue + explored": +200 to +300
+- "Lost Blue or died on Route 1": -25 to -40
+
+60/40 split of those buckets averages ~+158. The agent learned
+exploration but not in-battle decision-making.
+
+### Three hypotheses for "why Tail Whip"
+
+There has to be positive reinforcement on Tail Whip; otherwise
+the policy would settle near 50/50. I sat with this for a while
+and the structural answer surfaced:
+
+**1. Removing STEP_PENALTY made battle-menu existence free.** This
+is the load-bearing hypothesis. In V0.3.x, STEP_PENALTY = -0.001/step
+made "stand still" mildly costly. V0.4 set it to 0 along with the
+other strip. Now during Tail Whip turns, the agent advances frames
+(animations, HP bar updates, menu reappears) and pays *nothing*.
+Tackle ends the battle, cycling back to the overworld where
+another battle is probably waiting to kill you. Tail Whip *stays
+in the safe menu*. Discounted PV of "Tail Whip and not die for 20
+more steps" exceeds "Tackle, finish, walk into next likely-fatal
+battle."
+
+**2. Menu cursor inertia.** Pokemon Red's FIGHT menu remembers the
+last-used move. Once the agent randomly Tail Whips once, "press A"
+reselects Tail Whip without the agent learning anything about
+*which* move it's picking. The downsampled grayscale obs doesn't
+clearly show the small cursor sprite, so the policy can't
+differentiate "cursor on Tackle" from "cursor on Tail Whip" — it
+just learned "A in battle = neutral thing happens." Compounds with
+#1: once cursor is stuck on Tail Whip, no gradient pressure to
+move it.
+
+**3. Discount-rate effect.** PV(-25 at step 5) ≈ -24.9 vs PV(-25
+at step 20) ≈ -24.5. Delaying the eventual blackout shaves
+fractional return. Probably second-order to #1 and #2.
+
+### The diagnostic asymmetry
+
+Important: the failure isn't "V0.4 needs per-action reward signal
+to discriminate Tackle from Tail Whip." It's narrower than that.
+V0.4 inadvertently made *being in a neutral state forever* a
+winning strategy by removing all per-step friction. The reward
+landscape rewarded HP gains (heal_quad) but was silent on HP
+losses. Tail Whip = enemy hits Squirtle every turn = sustained
+unrewarded damage. The reward function had no way to *see* the
+damage.
+
+### V0.4.1: DAMAGE_QUAD symmetric to HEAL_QUAD
+
+The fix: mirror the heal reward on the damage side.
+
+```
+delta_hp_frac < 0  ->  reward -= (delta)^2 * 15
+```
+
+Same coefficient (15) as HEAL_QUAD. (delta)² weighting matches
+the heal curve. Per-turn damage of ~15% HP pays roughly -0.34.
+
+Math check:
+- Tackle-win 4-turn battle: ~-1.4 total damage tax
+- Tail Whip 10-turn stall: ~-3.4 total damage tax
+
+Tackle becomes mathematically preferable without us adding any
+per-action reward. The agent should discover this through the
+existing TRAINER_WIN_BONUS + falling per-area kill log + the
+new asymmetric damage cost.
+
+Faint events excluded (`cur == 0`): FAINT_PENALTY -5 already
+handles those, no double-billing.
+
+### Why this still respects the V0.4 thesis
+
+The V0.4 meta-discipline (Day 3) was: don't add knobs to map
+direct behavior; restructure the landscape. DAMAGE_QUAD is *not*
+"penalize Tail Whip." It's "every state where HP went down is
+slightly worse." It rewards state changes, not actions.
+
+The cleaner framing: V0.4 was internally asymmetric — heal
+rewarded, damage silent. V0.4.1 restores symmetry. Still
+curve-shaped, still state-based, still future-seeking.
+
+I'm willing to ship this without violating the discipline because
+the fix isn't behavioral shaping — it's making the existing
+HEAL_QUAD reward two-sided.
+
+### Entropy sweep findings (negative)
+
+Along the way I also tried higher-entropy variants of V0.4: e03
+(0.03) and e05 (0.05), running alongside e01 (0.01). All three
+showed Tail Whip lock-in to varying degrees. The hypothesis that
+higher entropy would let Tackle stay in the in-battle sampling
+distribution long enough to discover wild-battle wins didn't hold
+— the structural problem (no in-battle damage signal) dominates
+the entropy effect. Cancelled e03/e05 when V0.4.1 shipped; e01
+(17653) kept running as the no-DAMAGE_QUAD control.
+
+### What's running tonight
+
+- **17653** — V0.4 baseline (entropy 0.01, no DAMAGE_QUAD)
+- **17725** — V0.4.1 (entropy 0.01, DAMAGE_QUAD = +15)
+
+Same scale (3 GPUs each on different L40S nodes), same config
+except reward class. Clean A/B by morning.
+
+### Operational change
+
+Updated repo CLAUDE.md to be a primer for new agent sessions:
+pointers to design-log, vault MOC, decision notes, ELSA workflows,
+and the discipline. Also softened the "4-GPU is dead" framing to
+"check cluster state before submitting" — 4-GPU availability is
+intermittent, not gone. Added concrete queries for picking the
+right GPU count by current node state.
+
+### Open thread
+
+The 0.4.1 fix tests the "no per-step friction" hypothesis. If
+17725 climbs past 17653's plateau by morning, that hypothesis
+landed. If both flatline at the same plateau, the real issue is
+the menu-cursor-inertia hypothesis (#2 above) and we need a
+different fix — probably action-masking in the battle menu, or
+including the cursor position in the obs more explicitly.
+
+Tomorrow's read tells us which hypothesis was load-bearing.
