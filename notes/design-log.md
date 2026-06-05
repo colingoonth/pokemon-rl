@@ -885,3 +885,229 @@ different fix — probably action-masking in the battle menu, or
 including the cursor position in the obs more explicitly.
 
 Tomorrow's read tells us which hypothesis was load-bearing.
+
+## 2026-06-05 — Day 5: V0.4.1 menu-stall + V0.4.2 three-arm design + cluster block
+
+### How the morning read fell
+
+Watched 17653 (V0.4 baseline) first at iter 16100 — ~3× longer
+than the original iter 5000 Tail Whip diagnosis. Still spamming
+Tail Whip in wild battles. So the "more steps will fix it"
+possibility is dead: asymmetry was load-bearing, not training
+duration. V0.4 baseline is structurally stuck.
+
+Pulled metrics on 17725 (V0.4.1) at iter 12600 (~77M steps):
+mean_return_last20 = **-19.5**, entropy = **1.10–1.17**,
+unique_tiles_total = **24**. The combination is a much louder
+signal than I expected. Entropy near 1.1 at iter 12600 with
+entropy_coef=0.01 is well above committed-policy levels (max is
+log(7) ≈ 1.95). Return is negative. Tile count is 24 — agent
+isn't progressing past the Blue rival battle at all.
+
+### What V0.4.1 actually learned
+
+Initially I read the metrics as "DAMAGE_QUAD over-deterred
+combat, agent refuses to fight." Then Colin watched it. The
+agent **knows it can't run from a trainer fight**, so it's not
+just refusing — it's actively navigating menu state to avoid
+committing a move. Opens FIGHT → backs out → opens PKMN → backs
+out → opens ITEM → backs out. Mashing B and cancelling out of
+submenus indefinitely. The enemy never gets a turn (you can't
+attack until the player commits a move), so Squirtle takes no
+damage and the DAMAGE_QUAD tax never fires.
+
+DAMAGE_QUAD did exactly what we asked: the agent learned that HP
+loss is bad. It just routed around the signal via a path I hadn't
+modeled. The Day 4 menu-cursor-inertia hypothesis (#2) is now
+real — not as a hypothesis about V0.4 baseline but about V0.4.1's
+fix. The agent learned to avoid the cursor position that triggers
+the enemy turn.
+
+### The structural pattern (and what V0.4 actually broke)
+
+Both V0.4 baseline (Tail Whip lock-in) and V0.4.1 (menu-stall)
+are symptoms of the same structural hole: **V0.4 removed all
+per-step in-battle friction.** Without that friction, whichever
+in-battle state pays the least cost becomes the attractor.
+
+Under V0.4: Tail Whip pays nothing per turn (DAMAGE_QUAD doesn't
+exist, STEP_PENALTY removed), so the agent parks there. Tail
+Whip happens to also pay nothing in damage to the enemy, and the
+enemy eventually KOs Squirtle (faint -5, lose -20), but the
+discounted-PV math makes "stay in the safe menu" preferable.
+
+Under V0.4.1: DAMAGE_QUAD made FIGHT costly relative to non-FIGHT
+menu navigation, so the agent now parks in submenu navigation
+where no enemy turn ever happens. Same structural pattern, new
+free-state attractor.
+
+The Day 4 "restore STEP_PENALTY" rejected alternative needs to be
+revisited with this evidence. It was rejected as "too blunt;
+penalizes all menu turns including legitimate strategic ones."
+That objection still stands for a global STEP_PENALTY. But it
+doesn't stand for an in-battle-scoped activity-based penalty —
+the legitimate use of in-battle menu time is short
+(single-deliberation turns), and a triggered penalty rather than
+a flat per-step penalty preserves that.
+
+### V0.4.2 — three-pronged structural fix
+
+Three things change together:
+
+**1. BATTLE_STALL: -0.01/step after 30 consecutive steps of no HP
+change on either side.** This is STUCK ported to battle. STUCK
+fires when no new tile is visited for 200 steps — it's
+activity-based, state-shaped, scoped to the "you've been in the
+same situation too long" regime. The current STUCK never fires
+in battle because tile count doesn't change in battle. The battle
+equivalent is no HP delta on either side. Same philosophy, same
+gentle slope, scoped to in-battle frames.
+
+Menu-stall → no HP change → counter increments → after 30 steps,
+penalty fires every step.
+Tail Whip lock-in → enemy attacks every turn → HP delta → counter
+resets → no BATTLE_STALL, but DAMAGE_QUAD fires.
+Tackle exchange → HP delta from both sides → counter resets,
+BATTLE_STALL doesn't fire, DAMAGE_QUAD partial.
+
+Tackle becomes mathematically preferable without any move-specific
+knob. The agent retains freedom to use Tail Whip strategically.
+
+Coefficient calibration: STUCK is -0.005/step. Doubled to -0.01
+because in-battle stall has zero incidental value (overworld
+wander loops might still trip new tiles incidentally; menu-stall
+gets nothing).
+
+**2. DAMAGE_QUAD_COEF: 15 → 5.** Asymmetry signal preserved
+(Tackle still beats Tail Whip by ~2-3× cumulative damage tax) at
+a magnitude that doesn't dominate bootstrap. Per-turn at ~15% HP
+loss: -0.34 → -0.11, roughly matches LEVEL increment magnitude.
+
+The original 15 was chosen for state-shape symmetry with HEAL_QUAD
+(also 15). But the firing-frequency asymmetry makes the
+magnitudes effectively asymmetric in the other direction:
+HEAL_QUAD fires rarely (heal events sparse), DAMAGE_QUAD fires
+every turn of every battle. Matching coefficients gave a cumulative
+damage tax that swamped the rest of the landscape.
+
+**3. LOSE_BATTLE: -20 → -10.** V0.4's raise from -7 to -20
+predated DAMAGE_QUAD. With DAMAGE_QUAD now handling ongoing damage
+cost during losing fights, -20 was double-counting the same fight.
+-10 keeps blackout meaningfully costly without that
+double-counting.
+
+### Bootstrap EV math (the load-bearing argument)
+
+The reason V0.4.1 cratered isn't that any single coefficient was
+wrong. It's that the combined negative outcome of "lose a fight"
+under V0.4.1 was -28 (~-3 damage tax + -5 faint + -20 lose),
+while the positive outcome of "win a fight" was only ~+8 (after
+~-5 damage tax during the win). At any bootstrap-realistic win
+rate (~30% for an uncertain Squirtle vs Bulbasaur with type
+disadvantage), expected return per battle was -17. That matches
+observed -19.5. The Blue rival fight was genuinely net-negative,
+so the agent's correct response was "don't fight."
+
+Under V0.4.2 (center arm, DQ=5, LOSE=-10):
+  Win: BEAT_MON +1.96, LEVEL +0.1, TRAINER_WIN +10, DAMAGE_QUAD ~-1
+       = +11
+  Lose: DAMAGE_QUAD ~-1, FAINT -5, LOSE_BATTLE -10 = -16
+  EV at 30% win = 0.3 × 11 + 0.7 × -16 = -7.9 (was -17.2)
+
+Breakeven win rate: 57% (was ~75% in V0.4.1). Within
+bootstrap-recoverable range — the agent only needs one strategy
+that crosses 60% to start the learning loop.
+
+### Three arms, spread by breakeven
+
+Submitted as a sweep across the bootstrap-feasibility range:
+
+| Variant | DAMAGE_QUAD | LOSE_BATTLE | Breakeven | Scale | Entropy |
+|---|---|---|---|---|---|
+| **center** | 5 | -10 | ~57% | ddp3 (node004) | 0.01 |
+| **harsh** | 8 | -15 | ~64% | ddp2 (node002) | 0.005 |
+| **gentle** | 3 | -7 | ~51% | 1gpu (node003/005) | 0.005 |
+
+Center gets the 3-GPU allocation as the expected-best outcome
+with standard entropy. Harsh and gentle are diagnostic probes at
+eager entropy — they're meant to commit fast so we can read what
+each landscape favors at iter 3000-5000.
+
+What the spread tests:
+- If center works and gentle works too → landscape is robust;
+  damage magnitude was the dominant axis
+- If only center works → calibration is narrow; we'd need finer
+  sweeps
+- If only gentle works → DAMAGE_QUAD=5 is still too harsh for
+  bootstrap; need to keep dropping
+- If only harsh works → BATTLE_STALL is doing all the work and
+  damage calibration was secondary
+- If none work → menu-cursor-inertia is structural beyond
+  reward design; need action-masking or richer obs
+
+### Why three arms now (not one at a time)
+
+Normally I'd ship one variant and iterate. Three reasons for the
+spread this time:
+
+1. V0.4.1's data already pre-falsified DAMAGE_QUAD=15 +
+   LOSE=-20 as too harsh. So we're not testing those
+   independently — we're testing whether the recalibrated range
+   has a sweet spot.
+2. The three failure modes are different enough (Tail Whip
+   lock-in, menu-stall, refusal) that getting all three answers
+   from one variant would still leave ambiguity. The spread
+   isolates which axis is load-bearing.
+3. ELSA had 7 free GPUs at submit time. Three single-node runs
+   fit without queue contention. The marginal cost of three vs
+   one was just submission time.
+
+### Cluster block (operational)
+
+After submitting the three V0.4.2 sbatches, all three sat in PD
+with `QOSMaxCpuPerUserLimit`. Cancelling the two V0.4 grandfather
+jobs (17653, 17725) did not unblock them — the new submissions
+then hit `QOSMaxGRESPerUser`. Checked the QOS config:
+
+```
+sacctmgr show qos starter
+  MaxTRESPU = cpu=4,gres/gpu=0,mem=32G
+  MaxJobs = 4
+  MaxSubmit = 10
+```
+
+My account is on `starter` QOS, which literally allows zero GPUs
+and 4 CPUs per user. The previous days' 3-GPU ddp3 jobs were
+grandfathered through under what must have been a less-restrictive
+prior QOS state. Anything new submitted today is hard-blocked.
+
+This is a cluster-side policy change, not anything we did. Most
+likely either (a) routine QOS migration that landed on my account,
+or (b) fairshare-tier downgrade after sustained heavy usage over
+3 days. Email sent to Sean Sivy (cluster escalation contact)
+asking whether this is misconfig or appropriate throttling, and
+offering to reduce to single-GPU runs / off-peak windows if
+needed.
+
+V0.4.2 code is committed (74fcf61), pushed, ready on ELSA. Three
+sbatches will submit cleanly once the QOS unblocks. Until then,
+training is paused.
+
+### Operational note for future me
+
+Cancelling running jobs to free quota for new submissions only
+works if the new submissions are *eligible* under your current
+QOS. Always check `sacctmgr show qos <yourqos>` before scancel —
+if the QOS itself has been tightened, freeing CPUs doesn't help.
+The 17653/17725 cancels lost actual training data (they would have
+kept running indefinitely) for no scheduling gain.
+
+### Open thread
+
+When ELSA unblocks: submit the three V0.4.2 sbatches, watch each
+at iter 3000-5000 (low-entropy probe pattern), interpret per the
+"what the spread tests" framework above. If center or gentle
+land on Tackle and clear the bootstrap, V0.4.2 was the right fix.
+If all three fail in different ways, that's strong evidence the
+in-battle problem is beyond reward design and we need to look at
+the observation/action space (cursor visibility, action masking).
