@@ -7,6 +7,7 @@ modules.
 """
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,12 @@ BUTTON_HOLD_FRAMES = 12
 SCREEN_H = 72   # 144 / 2
 SCREEN_W = 80   # 160 / 2
 
+# Pokemon Red (MBC3) has 32KB of battery-backed save RAM. We supply an
+# in-memory pre-zeroed buffer of this exact size as PyBoy's ram_file so
+# it doesn't auto-create a `<rom>.ram` companion on disk. Each env
+# subprocess gets its own buffer — no NFS contention at cluster startup.
+CART_RAM_BYTES = 32768
+
 
 class PokemonRedEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 60}
@@ -65,7 +72,18 @@ class PokemonRedEnv(gym.Env):
                 "Run: uv run python -m pokerl.scripts.make_save_state"
             )
 
-        self.pyboy = PyBoy(str(self.rom_path), window="null" if headless else "SDL2")
+        # ram_file=pre-zeroed BytesIO keeps PyBoy from auto-creating a
+        # `<rom>.ram` companion on disk. With N PyBoy subprocesses racing
+        # for the same NFS file on cluster startup, partial reads cause
+        # PyBoyAssertException ("No data") and crash rank 0 — bringing the
+        # whole DDP group down via NCCL timeout. Each env gets its own
+        # in-memory save-RAM instead. Must be pre-sized to the cartridge's
+        # save RAM size or PyBoy's load_ram raises "No data".
+        self.pyboy = PyBoy(
+            str(self.rom_path),
+            window="null" if headless else "SDL2",
+            ram_file=io.BytesIO(b"\x00" * CART_RAM_BYTES),
+        )
 
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(SCREEN_H, SCREEN_W), dtype=np.uint8
