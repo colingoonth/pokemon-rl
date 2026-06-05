@@ -941,6 +941,51 @@ class RewardV0_3_4(RewardV0_3_3):
 RewardV0_4_0 = RewardV0_3_4
 
 
+class RewardV0_4_1(RewardV0_4_0):
+    """V0.4.1: V0.4.0 + DAMAGE_QUAD penalty symmetric to HEAL_QUAD.
+
+    V0.4.0 (Tail Whip-locked across entropy 0.005 / 0.01 / 0.03):
+    rewarded HP gains via the quadratic heal but was silent on HP
+    losses. Combined with STEP_PENALTY=0, "stand still in the battle
+    menu Tail Whipping" had no per-step cost — even though Squirtle
+    was taking damage every turn. The agent learned battles were a
+    safe zone and any move that prolonged them was preferable.
+
+    Fix: make damage taken symmetric to healing.
+        delta_hp_frac < 0  ->  reward += -(delta)^2 * 15
+
+    The (delta)^2 weighting matches HEAL_QUAD's curve. Per-turn damage
+    of ~15% HP pays roughly -0.34. A Tackle-win 4-turn battle taxes
+    ~1.4 total. A Tail Whip-stall 10-turn battle taxes ~3.4. Tackle
+    becomes mathematically preferable without us adding per-action
+    rewards — still pure state-based, still curve-shaped, still V0.4.
+
+    Faint events are excluded (cur==0): FAINT_PENALTY -5 already
+    handles them and we don't want to double-bill. Blackout heal
+    (HP 0 -> full) is naturally not a damage event so the existing
+    blackout guard isn't needed here.
+    """
+
+    DAMAGE_QUAD_COEF = 15.0
+
+    def compute(self, mem) -> float:
+        # Snapshot prev hp_frac BEFORE super() updates it via heal_quad.
+        prev_hp_frac = self._last_hp_frac
+
+        reward = super().compute(mem)
+
+        party_hp = rm.party_hp(mem)
+        cur = sum(c for c, _m in party_hp)
+        mx = sum(m for _c, m in party_hp)
+        if mx > 0 and cur > 0:  # alive — let FAINT_PENALTY handle dead party
+            hp_frac = cur / mx
+            delta = hp_frac - prev_hp_frac
+            if delta < 0 and self.DAMAGE_QUAD_COEF > 0:
+                reward -= (delta ** 2) * self.DAMAGE_QUAD_COEF
+
+        return reward
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -993,6 +1038,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_3_3": RewardV0_3_3,
     "RewardV0_3_4": RewardV0_3_4,
     "RewardV0_4_0": RewardV0_4_0,
+    "RewardV0_4_1": RewardV0_4_1,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,
