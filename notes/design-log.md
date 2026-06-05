@@ -394,3 +394,265 @@ so I don't reconsider this if I forget the cluster contention story.
 - A multi-day training run becomes the experiment unit (writeup
   finale, demo for portfolio) where the queue wait is a one-time
   cost amortized over many GPU-hours
+
+## 2026-06-05 — Day 3: V0.3.2/3 sweeps, hit the wall, full redesign to V0.4
+
+### Where V0.3.x got us
+
+The V0.3.x line (curriculum start at Blue battle + reward-magnitude
+tuning) was supposed to make the agent fight and heal. By V0.3.3 it
+fought well, didn't heal, and didn't progress past Route 1.
+
+Three quick observations from watching V0.3.3 at iter 10800 (~66M
+steps in):
+
+- **It will go into fights even at low HP**, then realize partway
+  through it's losing, and try to run. The flee-penalty bump worked.
+- **It does not head for a PokeCenter when its HP is low.** Even
+  with HEAL_QUAD_COEF=12 (Whidden-shaped quadratic HP-restored
+  reward), the agent never *finds* the heal chain. Dying is fine
+  because kills pay enough that fainting nets out positive over
+  the course of an episode.
+- **It doesn't make it to the next town.** Wanders Route 1 in
+  loops, fights, dies, respawns, repeats.
+
+### The wall I hit, in EV terms
+
+The reason V0.3.3 stalled is the per-cycle EV math:
+
+```
+Per-kill reward:         +20
+Per-faint+blackout cost: -25 + -7 = -32
+Typical episode:         5-10 kills before fainting
+Per-cycle net EV:        +100 to +200 (positive)
+```
+
+Dying is *profitable*. The agent is correctly maximizing return by
+fighting until it dies. No amount of healing-reward bumping fixes
+this because the agent never *experiences* the heal chain — random
+exploration from Route 1 to a PC + nurse-dialog is a low-probability
+action sequence, and the +12 quadratic-heal payoff is dwarfed by
+the +20 per-kill stream right next to it.
+
+### The framing shift to V0.4
+
+I stepped away from the project for a while and came back to it
+with a clean head. Roughly two hours of thinking from a full
+restart — not iterating on the V0.3.x design but deciding what I
+actually believed the reward function should look like. I
+already knew I wanted a complete rework before I sat down. The
+choices below are mine; I deliberately wasn't trying to crib
+Whidden, and most of what I landed on doesn't match his published
+shape anyway. (Where it does overlap — quadratic heal, softer
+death penalty — those were lookups I made *after* deciding on
+the structure, mostly to sanity-check that someone else had
+arrived at similar conclusions.)
+
+The core thesis I came back with: **direct per-action rewards
+train the agent to pick a confirmed ideal route towards a win.**
+That's the V0.3.x failure in one sentence. Each knob-turn —
+BEAT_MON +20, FLEE_PENALTY -5, FAINT_PENALTY -25 — taught the
+policy to optimize a specific behavior the reward designer
+already knew about. By the time I'd shipped V0.3.3 I was, in
+effect, hand-coding "fight, then flee if losing, then go heal" —
+the agent never had to *discover* any of it. And every time my
+hand-coded policy hit a corner case (no PC visits, no story
+progress) my response was to bolt on more reward shaping for
+the next failure.
+
+I want the agent to seek future value through chains of state, not
+follow per-step instructions I built into the reward. That's the
+philosophical pivot. The mechanical translation is:
+
+I spent about an hour of that two-hour window in Desmos. This
+wasn't decorative — it was the load-bearing part of the design.
+The reason every prior V0.x reward function felt arbitrary is
+that I was picking constants by gut ("does +20 sound right for a
+kill?") and then arguing about them. Desmos let me actually plot
+the curves and ask the real questions:
+
+- **What does each reward curve look like over its useful
+  domain?** For levels: log_6(level) is gentle and slow. At L5
+  it's 0.9; at L15 (Brock-ready) it's 1.51. The increment per
+  level is small (~0.1 around L5-15) — that's what I want: the
+  agent shouldn't be obsessed with leveling, just nudged toward
+  it.
+- **How do the cumulative magnitudes compare?** This is where
+  Desmos earned its keep. I plotted integrals/sums for each
+  reward over realistic game state. Cumulative BADGE for all 8
+  badges sums to ~450 (15 × x^1.3 from x=1 to 8). Cumulative
+  CATCH for the full pokedex sums to ~663. Cumulative EXPLORE
+  depends on N — at N=1000 tiles it's ~250, at N=3000 it's
+  ~2250, at N=5000 it's ~6250. **This is how I caught that
+  exploration was dominating everything by an order of
+  magnitude** before launching: my first coefficient was 0.0005
+  and the Desmos plot made it obvious that at any realistic
+  game-completion tile count, exploration would drown out badges
+  by 5-10×. Dropped to 0.0001 and the totals lined up.
+- **What's the relative payoff at each decision point?** For the
+  per-area kill cap, I plotted the falling log over kill 1-5 and
+  asked "what's the marginal value of the 5th kill versus
+  walking out of the area?" At kill 5 it's 0.76. Walking is
+  worth one new-tile reward (~0.5 mid-game). The two are
+  intentionally close — that's the engineered indifference point
+  where the agent should pick whichever serves the longer chain.
+- **Where do reward components compete?** The falling per-area
+  kill curve was a direct result of seeing on Desmos that a
+  rising curve would push the agent to stay-and-grind (the V0.3.x
+  failure mode), while a falling curve makes the *first* fight
+  in any new area worthwhile but caps the value of camping. I
+  considered both directions in the graph before picking falling.
+- **Are the discounted future values reachable?** PPO with
+  γ=0.999 propagates ~256-step horizons cleanly. Anything past
+  that gets heavily haircut. The Desmos work involved checking
+  that the curves' relevant payoffs land *within* that horizon
+  for a reasonable policy. Healing chain (~50 steps), per-area
+  kill cap (~30 steps), badge after Brock (~500+ steps,
+  partially reachable) — I picked formulas where the credit
+  assignment chain was achievable.
+
+The Desmos sheets are throwaway but the process wasn't. Every
+formula in V0.4 has a curve I looked at and a magnitude I checked
+against the others. Constants weren't guessed; they came out of
+the comparison. That's the thing the V0.3.x line was missing.
+
+The philosophy:
+1. **Remove dense per-action rewards** like BEAT_MON +20. Replace
+   with a capped, falling log over per-area kills so the agent
+   can't grind a single route. Combat becomes instrumental, not
+   the dominant signal.
+2. **Reward state in curves, not constants.** log_6(level) for
+   leveling, log_2.5(pokedex) for catches, 0.0001 × N^1.001 per
+   tile for exploration (growing with total tiles seen), 15 × x^1.3
+   per badge. Each one rewards *what you've accumulated*, not
+   *what you just did*.
+3. **Force future-seeking through chain-of-value.** The agent has
+   to fight to gain XP, gain XP to level, level to win, win to
+   reach badges. Each link individually pays small; the cumulative
+   chain only adds up if you actually progress.
+4. **Strip everything that doesn't carry weight.** Remove FLAG,
+   NEW_MAP, MOVE_BONUS, STEP_PENALTY, MART_PC_BONUS, PC_FIRST_VISIT,
+   GYM_BONUS, NEW_CATCH_BONUS, NEW_ENCOUNTER. One-shot rewards
+   don't drive recurring behavior; tiny rewards just dilute the
+   gradient signal. Keep the reward landscape lean.
+5. **Soften the death penalty.** Whidden's documented finding was
+   that big death penalties create the "agent fears the PC because
+   Pokemon got deposited there during a forced blackout heal"
+   trap. So FAINT -25 -> -5, LOSE -7 -> -20 (blackout itself is
+   bad but individual faints are non-fatal lessons).
+
+### V0.4 reward landscape
+
+| Category | Formula | Notes |
+|---|---|---|
+| HEAL_QUAD | `(delta_hp_frac)^2 × 15` | Whidden-style continuous, fires on any HP rise |
+| LEVEL | `log_6(new_level)` per unit | At L6: 1.0. At L15: 1.51. ~13 cumulative L5→15. |
+| CATCH | `log_2.5(new_pokedex_count)` | First new catch (pokedex=2): 0.76. All 151: ~663. |
+| EXPLORE | `0.0001 × N^1.001` per new tile | At N=1000: 0.50/tile. At N=3000: 1.52. |
+| BEAT_MON | `log_2.5(7 - kill_n)`, cap 5/area | Falling. Kill 1: 1.96. Kill 5: 0.76. Total per area ~7.2. Per `map_id`. |
+| BADGE | `15 × x^1.3` after gaining | 1st: 15. 2nd: 37. 8th: 224. Superlinear. |
+| POKEBALL_BUY | `5 × max(0, 1 - n/20)` | Per ball, n=owned before. Linear decay, 0 past 20. |
+| STUCK | `-0.005/step` after 200 steps with no new tile | Activity-based, catches tight wander loops. |
+| TRAINER_WIN_BONUS | `+10` (was +30) | Sparse but solid signal. |
+| FLEE_PENALTY | `-0.5` (was -5) | Strategic retreat is cheap now. |
+| FAINT_PENALTY | `-5` (was -25) | Whidden softening. |
+| LOSE_BATTLE | `-20` (was -7) | Blackout still costly. |
+
+Disabled (set to 0): NEW_MAP_REWARD, MOVE_BONUS, STEP_PENALTY,
+MART_PC_BONUS, PC_FIRST_VISIT, GYM_BONUS, FLAG_REWARD,
+NEW_CATCH_BONUS, NEW_ENCOUNTER, BEAT_MON_REWARD (replaced by
+capped log), LEVEL_REWARD (replaced by log_6), CATCH_REWARD
+(replaced by log_2.5), EXPLORE_REWARD (replaced by power-law),
+BADGE_REWARD (replaced by power-law).
+
+### Key design decisions and the why
+
+**Why the falling per-area kill curve (rising would be the obvious
+choice for "clear the route"):** I considered both directions.
+Rising would reward completion — finish the area, get the big
+payoff. Falling rewards the *engagement decision* — first kill in
+a new area pays most, and there's diminishing return on staying
+to grind. I chose falling because the failure I'm fixing is
+"agent grinds Route 1 forever"; the curve has to discourage
+extended camping, and falling does that more cleanly.
+
+**Why 0.0001 not 0.0005 on the explore coefficient:** I worked
+with 0.0005 in Desmos, but Claude flagged that at N=3000 tiles
+(realistic mid-training), cumulative exploration reward would
+be ~2250 — 5x larger than total BADGE cumulative across all 8
+badges. Exploration would dominate everything. Dropping to 0.0001
+puts cumulative exploration at ~450 at N=3000, comparable in
+magnitude to badge totals. Better-balanced reward landscape.
+
+**Why I'm keeping a small FAINT_PENALTY at all (-5):** Whidden
+removed it entirely. The argument for keeping a small one: the
+quadratic heal reward + blackout cost are downstream signals; a
+direct, small penalty on faint helps the value function attribute
+the cost to the *decision* that led to the faint, not just the
+terminal blackout. -5 is small enough that the V0.3.x failure
+mode (death is profitable) doesn't recur, but big enough to
+register on the per-step gradient.
+
+**Why I'm not adopting Whidden wholesale:** his shipping version
+disables BEAT_MON_REWARD entirely. I keep a capped version because:
+(a) some early-game gradient on combat is needed before the
+log_6(level) signal kicks in; (b) without any per-kill payoff the
+agent might never learn to fight at all in the rival battle (the
+curriculum start state). The cap at 5/area is the compromise —
+combat learning happens, but grinding stops being profitable.
+
+**Why entropy_coef 0.005 + 0.01 sweep:** the redesign is sparser
+than V0.3.x. Lower entropy should help the policy commit to the
+discovered value chains faster, but too low and it locks in
+before discovery. Running both 0.005 (eager) and 0.01 (baseline)
+in parallel to see which entropy level matches the new reward
+density.
+
+### What "working" looks like for V0.4
+
+V0.4 won't be evaluated by mean_return the way V0.3.x was — the
+units changed. Expecting V0.3.3's +750 plateau here is wrong;
+V0.4 might cap at +100-200 even when working, because the
+reward magnitudes are smaller.
+
+Real signals to watch:
+1. **Tile count climbs past V0.3.x's per-iter ceiling (~25K
+   all-envs).** If V0.4 explores more, the exploration curve is
+   working.
+2. **Episode length increases.** Agent staying alive longer means
+   the future-seeking design is paying off.
+3. **First badge event** — visible in train.out as a +15 reward
+   jump in any single env. V0.3.x never got there.
+4. **Pokedex count increasing in watch.py** — proves catch
+   reward fired and the agent did something with it.
+
+Patience window: V0.4 will take longer to read than V0.3.x. Credit
+assignment over 100+ step chains takes many episodes. Honest
+estimate: 6-8 hours for first read, 24+ hours for confident
+verdict. The reward signal is real but sparse.
+
+### What I'm explicitly betting on
+
+That removing dense per-kill rewards forces the agent to find
+the longer chain (kill → XP → level → progress → badge), and
+that the curve-shaped exploration reward pulls it past Route 1
+naturally without me having to hand-design "go north to Viridian."
+
+The bet might fail in two ways:
+- Agent never learns to fight at all (too sparse), policy
+  collapses to a flee-everything degenerate strategy.
+- Agent finds a degenerate exploration exploit (some grid pattern
+  that registers as "new tiles" via emulator quirk) and farms it
+  indefinitely.
+
+Both are recoverable. The bet is worth making because dense action
+shaping has now failed three times in a row (V0.2.7 → V0.3.0 →
+V0.3.1 → V0.3.2 → V0.3.3), and the project deserves an honest
+philosophical pivot rather than a sixth knob-turn.
+
+### Code housekeeping
+
+Class is named `RewardV0_3_4` in code (since it was built before
+the V0.4 rename). Kept as the actual class for the running jobs;
+added `RewardV0_4_0 = RewardV0_3_4` alias going forward so new
+configs use the conceptually-correct version label.

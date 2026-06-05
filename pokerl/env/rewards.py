@@ -934,6 +934,13 @@ class RewardV0_3_4(RewardV0_3_3):
         return reward
 
 
+# Alias: V0.3.4 is the conceptual start of the V0.4 line (full strip +
+# curve-based future-seeking design). Kept under the old name for the
+# currently-running jobs that loaded the class by that name; future
+# configs should reference RewardV0_4_0.
+RewardV0_4_0 = RewardV0_3_4
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -985,6 +992,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_3_1": RewardV0_3_1,
     "RewardV0_3_3": RewardV0_3_3,
     "RewardV0_3_4": RewardV0_3_4,
+    "RewardV0_4_0": RewardV0_4_0,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,
