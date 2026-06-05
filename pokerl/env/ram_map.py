@@ -59,6 +59,18 @@ ADDR_EVENT_FLAGS_START = 0xD747
 ADDR_EVENT_FLAGS_END   = 0xD886  # inclusive
 EVENT_FLAGS_BYTES      = ADDR_EVENT_FLAGS_END - ADDR_EVENT_FLAGS_START + 1
 
+# Pokedex owned bitfield (19 bytes, 1 bit per species, 151 species).
+ADDR_POKEDEX_OWNED_START = 0xD2F7
+ADDR_POKEDEX_OWNED_END   = 0xD309  # inclusive
+
+# Bag inventory: count byte at 0xD31D, then [item_id, qty] pairs starting at 0xD31E,
+# terminated by 0xFF after the last pair. Max 20 items.
+ADDR_BAG_COUNT = 0xD31D
+ADDR_BAG_ITEMS = 0xD31E
+
+# Item IDs (from pret/pokered constants/item_constants.asm)
+ITEM_POKEBALL_ID = 0x04
+
 # Known map ids (handful — full list in pret/pokered constants/map_constants.asm)
 MAP_PALLET_TOWN        = 0x00
 MAP_VIRIDIAN_CITY      = 0x01
@@ -217,3 +229,22 @@ def event_flags_popcount(mem: MemoryView) -> int:
     for i in range(EVENT_FLAGS_BYTES):
         total += bin(mem[ADDR_EVENT_FLAGS_START + i]).count("1")
     return total
+
+
+def pokedex_owned_count(mem: MemoryView) -> int:
+    """Number of species with their pokedex "owned" bit set. Squirtle is
+    already #1 at the curriculum start state, so a fresh agent reads 1."""
+    total = 0
+    for a in range(ADDR_POKEDEX_OWNED_START, ADDR_POKEDEX_OWNED_END + 1):
+        total += bin(mem[a]).count("1")
+    return total
+
+
+def bag_item_quantity(mem: MemoryView, item_id: int) -> int:
+    """Quantity of `item_id` in the bag, or 0 if not present. Bag is
+    [count][id1, qty1][id2, qty2]...[0xFF terminator]."""
+    n = mem[ADDR_BAG_COUNT]
+    for i in range(min(n, 20)):
+        if mem[ADDR_BAG_ITEMS + 2 * i] == item_id:
+            return mem[ADDR_BAG_ITEMS + 2 * i + 1]
+    return 0

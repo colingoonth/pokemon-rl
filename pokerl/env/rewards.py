@@ -7,6 +7,7 @@ badges. Expect v2+ to fix things v1 gets wrong.
 """
 from __future__ import annotations
 
+import math
 from typing import Protocol
 
 from pokerl.env import ram_map as rm
@@ -782,6 +783,157 @@ class RewardV0_3_3(RewardV0_3_1):
         return reward
 
 
+class RewardV0_3_4(RewardV0_3_3):
+    """V0.3.4: full strip + curve-based future-seeking rewards.
+
+    Philosophy shift: remove direct, dense action rewards; replace with
+    log / power-law / capped rewards on game state. Force the agent to
+    seek future value (badges, exploration, pokedex collection) rather
+    than maximizing per-step combat.
+
+    Active rewards:
+      - HEAL_QUAD_COEF 15: (delta_hp_frac)^2 * 15 (was 12 in V0.3.3)
+      - LEVEL: log_6(level_just_hit) per unit increase
+      - CATCH: log_2.5(new_pokedex_count) per pokedex increment
+      - EXPLORE: 0.0001 * N^1.001 per new tile (N = total seen so far)
+      - BEAT_MON: capped 5/area, falling log_2.5(7 - kill_n)
+      - BADGE: 15 * x^1.3 per badge gained (x = new total)
+      - POKEBALL_BUY: 5 * max(0, 1 - n/20) per ball bought
+      - STUCK: -0.005/step after 200 steps with no new tile discovered
+      - TRAINER_WIN_BONUS +10 (down from +30)
+      - FLEE_PENALTY -0.5 (down from -5)
+      - FAINT_PENALTY -5 (down from -25 — Whidden-style softening)
+      - LOSE_BATTLE -20 (up from -7)
+
+    Disabled (set to 0): NEW_MAP_REWARD, MOVE_BONUS, STEP_PENALTY,
+      MART_PC_BONUS, PC_FIRST_VISIT, GYM_BONUS, FLAG_REWARD,
+      NEW_CATCH_BONUS, NEW_ENCOUNTER, BEAT_MON_REWARD (replaced by capped log),
+      LEVEL_REWARD (replaced by log_6), CATCH_REWARD (replaced by log_2.5),
+      EXPLORE_REWARD (replaced by curve), BADGE_REWARD (replaced by power law).
+    """
+
+    # --- Disable inherited direct rewards (replaced by curves below) ---
+    EXPLORE_REWARD = 0.0
+    MOVE_BONUS = 0.0
+    STEP_PENALTY = 0.0
+    LEVEL_REWARD = 0.0
+    FLAG_REWARD = 0.0
+    BADGE_REWARD = 0.0
+    NEW_ENCOUNTER = 0.0
+    BEAT_MON_REWARD = 0.0
+    NEW_MAP_REWARD = 0.0
+    CATCH_REWARD = 0.0
+    NEW_CATCH_BONUS = 0.0
+    MART_PC_BONUS = 0.0
+    PC_FIRST_VISIT = 0.0
+    GYM_BONUS = 0.0
+    PC_HEAL_LOW = 0.0
+    PC_HEAL_FULL = 0.0
+
+    # --- Direct constants kept but retuned ---
+    FAINT_PENALTY = -5.0
+    LOSE_BATTLE = -20.0
+    FLEE_PENALTY = -0.5
+    TRAINER_WIN_BONUS = 10.0
+    HEAL_QUAD_COEF = 15.0
+
+    # --- New curve constants ---
+    KILL_CAP_PER_AREA = 5
+    EXPLORE_COEF = 0.0001
+    EXPLORE_EXPONENT = 1.001
+    POKEBALL_BUY_COEF = 5.0
+    POKEBALL_BUY_CAP = 20
+    STUCK_NO_TILE_THRESHOLD = 200
+    STUCK_PENALTY_PER_STEP = -0.005
+    BADGE_COEF = 15.0
+    BADGE_EXPONENT = 1.3
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._kills_per_area: dict[int, int] = {}
+        self._last_pokedex_count = 0
+        self._last_pokeballs = 0
+        self._steps_since_new_tile = 0
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        self._kills_per_area = {}
+        self._last_pokedex_count = rm.pokedex_owned_count(mem)
+        self._last_pokeballs = rm.bag_item_quantity(mem, rm.ITEM_POKEBALL_ID)
+        self._steps_since_new_tile = 0
+
+    def compute(self, mem) -> float:
+        # Snapshot pre-state for delta-based custom rewards. super() will
+        # update these in-place during its compute pass, so we need values
+        # from BEFORE the call.
+        prev_level_total = self._base_level_total
+        prev_badge_count = self._base_badge_count
+        prev_visited_count = len(self._visited)
+        prev_enemy_hp = self._last_enemy_hp
+        prev_in_battle = self._last_in_battle
+
+        reward = super().compute(mem)
+
+        # ---- LEVEL: log_6(new_level) per unit gained ----
+        level_total_now = sum(rm.party_levels(mem))
+        if level_total_now > prev_level_total:
+            for new_level in range(prev_level_total + 1, level_total_now + 1):
+                if new_level > 1:
+                    reward += math.log(new_level) / math.log(6)
+
+        # ---- CATCH: log_2.5(new_pokedex_count) per pokedex increment ----
+        pokedex_now = rm.pokedex_owned_count(mem)
+        if pokedex_now > self._last_pokedex_count:
+            for new_count in range(self._last_pokedex_count + 1, pokedex_now + 1):
+                if new_count > 1:
+                    reward += math.log(new_count) / math.log(2.5)
+            self._last_pokedex_count = pokedex_now
+
+        # ---- EXPLORE: 0.0001 * N^1.001 per new tile ----
+        visited_now = len(self._visited)
+        if visited_now > prev_visited_count:
+            for n in range(prev_visited_count + 1, visited_now + 1):
+                reward += self.EXPLORE_COEF * (n ** self.EXPLORE_EXPONENT)
+            self._steps_since_new_tile = 0
+        else:
+            self._steps_since_new_tile += 1
+
+        # ---- BADGE: 15 * x^1.3 per badge gained ----
+        badge_count_now = rm.badges_count(mem)
+        if badge_count_now > prev_badge_count:
+            for new_count in range(prev_badge_count + 1, badge_count_now + 1):
+                reward += self.BADGE_COEF * (new_count ** self.BADGE_EXPONENT)
+
+        # ---- BEAT_MON: capped 5/area, falling log_2.5(7 - kill_n) ----
+        # Detect the same trigger as base BEAT_MON: enemy mon HP just hit 0
+        # during an ongoing battle.
+        in_battle_now = rm.in_battle(mem)
+        if (prev_in_battle != 0 and in_battle_now != 0
+                and prev_enemy_hp > 0
+                and rm.enemy_mon_hp(mem) == 0):
+            current_map = rm.map_id(mem)
+            kill_n = self._kills_per_area.get(current_map, 0) + 1
+            self._kills_per_area[current_map] = kill_n
+            if kill_n <= self.KILL_CAP_PER_AREA:
+                reward += math.log(7 - kill_n) / math.log(2.5)
+
+        # ---- POKEBALL_BUY: 5 * max(0, 1 - n/20) per purchase ----
+        pokeballs_now = rm.bag_item_quantity(mem, rm.ITEM_POKEBALL_ID)
+        if pokeballs_now > self._last_pokeballs:
+            for owned_before in range(self._last_pokeballs, pokeballs_now):
+                bonus = self.POKEBALL_BUY_COEF * max(
+                    0.0, 1.0 - owned_before / self.POKEBALL_BUY_CAP
+                )
+                reward += bonus
+        self._last_pokeballs = pokeballs_now
+
+        # ---- STUCK: -0.005/step after 200 steps with no new tile ----
+        if self._steps_since_new_tile > self.STUCK_NO_TILE_THRESHOLD:
+            reward += self.STUCK_PENALTY_PER_STEP
+
+        return reward
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -832,6 +984,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_2_7": RewardV0_2_7,
     "RewardV0_3_1": RewardV0_3_1,
     "RewardV0_3_3": RewardV0_3_3,
+    "RewardV0_3_4": RewardV0_3_4,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,
