@@ -82,6 +82,49 @@ uv run python -m pokerl.eval.watch \
     --steps 5000 --speed 0
 ```
 
+### Diagnostic probe pattern (run BEFORE a full committed training run)
+
+When shipping a new reward variant, run a **low-entropy probe** first
+to surface degenerate equilibria before sinking node-hours into a
+long committed run. This was the lesson of V0.4 → V0.4.1: the
+eager (entropy_coef=0.005) arm collapsed onto Tail Whip in ~5000
+iters and made the structural problem obvious. The higher-entropy
+arms (0.03, 0.05) were still too noisy at iter 1000 to reveal
+the same bug — they would have wasted hours masking it.
+
+**Pattern:**
+1. Build the new reward variant as you normally would.
+2. Make a thin probe config that copies the variant but sets
+   `entropy_coef: 0.005` (or even 0.001) and a low
+   `total_timesteps` (e.g. 30M — enough for the policy to commit
+   and reveal whatever it'll commit to).
+3. Submit the probe at single-GPU or 3-GPU scale depending on
+   availability. Single-GPU is usually fine — the goal is fast
+   diagnostic, not throughput.
+4. Watch a checkpoint at iter 3000-5000. Three outcomes:
+   - **Policy looks reasonable** → reward landscape isn't trivially
+     broken. Escalate to a full long run at the intended entropy.
+   - **Policy committed to a degenerate strategy** (Tail Whip spam,
+     menu-staring, idle exploit) → reward landscape has a hole.
+     Fix the landscape, then re-probe. Don't escalate.
+   - **Policy hasn't committed at all** (still ~max entropy) → probe
+     wasn't long enough or coefficient wasn't low enough. Lower
+     entropy_coef or extend.
+
+**Why low entropy works as a probe:** the policy commits fast, so
+whatever local optimum the reward landscape contains becomes
+visible quickly. If that optimum is degenerate, you find out in
+hours instead of days.
+
+**Why higher entropy hides bugs:** noisy sampling keeps the policy
+near-uniform for longer, averaging across "what the agent
+*would* commit to" and "what it currently samples." A degenerate
+equilibrium can be present in the policy distribution without
+being the dominant action yet.
+
+The probe doesn't replace the full run — it's a guardrail. After
+probe passes, run the full intended entropy for actual training.
+
 ### Ship a new reward variant
 1. Add a new `RewardV0_X_Y` class in `pokerl/env/rewards.py` inheriting
    from the current latest. Set ONLY the constants that change.
