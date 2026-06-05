@@ -986,6 +986,112 @@ class RewardV0_4_1(RewardV0_4_0):
         return reward
 
 
+class RewardV0_4_2_center(RewardV0_4_1):
+    """V0.4.2 (center arm): plug the in-battle menu-stall hole +
+    recalibrate negative coefficients that double-counted in V0.4.1.
+
+    Diagnosis from V0.4 baseline + V0.4.1 watch (Day 4-5):
+      - V0.4 (no DAMAGE_QUAD): Tail Whip lock-in — in-battle menu free
+      - V0.4.1 (DAMAGE_QUAD=15, LOSE=-20): refuses to commit moves at
+        all; navigates submenus without committing to avoid enemy turns
+        and skip the damage tax. Mean return -19.5 because LOSE_BATTLE
+        -20 stacked on DAMAGE_QUAD made bootstrap regime catastrophically
+        negative-EV (~-17 at 30% win rate).
+
+    Three-pronged structural fix:
+
+    1. BATTLE_STALL: -0.01/step after 30 consecutive steps of no HP
+       change on either side. Mirrors STUCK's activity-based philosophy,
+       scoped to in-battle frames. Plugs the menu-stall escape — menu
+       navigation that doesn't commit a move no longer evades the
+       reward signal entirely. Tackle/Tail Whip don't trigger this
+       because enemy turns produce HP delta either way.
+
+    2. DAMAGE_QUAD_COEF: 15 -> 5. Preserves the asymmetry signal
+       (Tackle still beats Tail Whip by ~2-3x cumulative damage tax)
+       at a magnitude that doesn't dominate bootstrap. Per-turn at
+       ~15% HP loss: -0.34 -> -0.11, roughly matches LEVEL increment.
+
+    3. LOSE_BATTLE: -20 -> -10. V0.4's raise to -20 predated
+       DAMAGE_QUAD; the latter now handles ongoing damage cost during
+       losing fights. -10 keeps blackout meaningfully costly without
+       double-counting the same fight's losses.
+
+    Predicted Blue rival EV at 30% win rate: ~-8 (was ~-17 in V0.4.1).
+    Breakeven ~57% — within bootstrap-recoverable range.
+    """
+
+    # Recalibrated from V0.4.1
+    DAMAGE_QUAD_COEF = 5.0
+    LOSE_BATTLE = -10.0
+
+    # New BATTLE_STALL machinery
+    BATTLE_STALL_THRESHOLD = 30
+    BATTLE_STALL_COEF = -0.01
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._battle_stall_counter = 0
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        self._battle_stall_counter = 0
+
+    def compute(self, mem) -> float:
+        # Snapshot pre-state BEFORE super() updates self._last_*
+        prev_in_battle = self._last_in_battle
+        prev_enemy_hp = self._last_enemy_hp
+        prev_party_hp_sum = (
+            sum(self._last_party_hp) if self._last_party_hp else None
+        )
+
+        reward = super().compute(mem)
+
+        # ---- BATTLE_STALL: penalize sustained no-HP-change in battle ----
+        # Counter increments each in-battle step where neither party_hp
+        # nor enemy_hp changed since the previous compute(). Resets on
+        # any HP delta either side, or on exiting battle.
+        in_battle_now = rm.in_battle(mem)
+        if in_battle_now != 0 and prev_in_battle != 0:
+            party_hp_sum_now = sum(c for c, _m in rm.party_hp(mem))
+            enemy_hp_now = rm.enemy_mon_hp(mem)
+            hp_changed = (
+                (prev_party_hp_sum is not None
+                 and party_hp_sum_now != prev_party_hp_sum)
+                or (enemy_hp_now != prev_enemy_hp)
+            )
+            if hp_changed:
+                self._battle_stall_counter = 0
+            else:
+                self._battle_stall_counter += 1
+                if self._battle_stall_counter > self.BATTLE_STALL_THRESHOLD:
+                    reward += self.BATTLE_STALL_COEF
+        else:
+            self._battle_stall_counter = 0
+
+        return reward
+
+
+class RewardV0_4_2_gentle(RewardV0_4_2_center):
+    """V0.4.2 gentle arm: lighter damage signal + lighter loss penalty.
+    Bootstrap breakeven ~51%. Tests whether more headroom lets the
+    agent commit to combat habits before refining away suboptimal
+    moves.
+    """
+    DAMAGE_QUAD_COEF = 3.0
+    LOSE_BATTLE = -7.0
+
+
+class RewardV0_4_2_harsh(RewardV0_4_2_center):
+    """V0.4.2 harsh arm: sharper damage signal + sharper loss penalty.
+    Bootstrap breakeven ~64%. Tests whether the in-battle policy will
+    commit to Tackle even when losing has real teeth, given that
+    BATTLE_STALL has plugged the menu-stall escape.
+    """
+    DAMAGE_QUAD_COEF = 8.0
+    LOSE_BATTLE = -15.0
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1039,6 +1145,9 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_3_4": RewardV0_3_4,
     "RewardV0_4_0": RewardV0_4_0,
     "RewardV0_4_1": RewardV0_4_1,
+    "RewardV0_4_2_center": RewardV0_4_2_center,
+    "RewardV0_4_2_gentle": RewardV0_4_2_gentle,
+    "RewardV0_4_2_harsh": RewardV0_4_2_harsh,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,

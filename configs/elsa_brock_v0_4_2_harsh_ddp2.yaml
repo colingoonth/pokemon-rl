@@ -1,0 +1,25 @@
+# V0.4.2 harsh arm (DDP2 — eager probe):
+#   BATTLE_STALL -0.01/step after 30 + DAMAGE_QUAD 15->8 + LOSE -20->-15
+# Predicted Blue rival bootstrap breakeven ~64%. Tests whether the in-
+# battle policy commits to Tackle even with real LOSE teeth, given
+# BATTLE_STALL has plugged menu-stall.
+# entropy_coef 0.005 (eager probe — diagnostic-probe discipline).
+run_name: elsa_brock_v0_4_2_harsh_ddp2
+state_path: states/blue_fight.state
+total_timesteps: 200_000_000
+n_envs: 16
+n_steps: 256
+n_epochs: 4
+minibatch_size: 256
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_4_2_harsh
