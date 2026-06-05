@@ -6,16 +6,29 @@ captured in those notes.
 
 ## The discipline (read first, every session)
 
-**Adding rewards to map direct behavior is wrong, and this project is
+Two load-bearing rules, both surfaced from real failure modes on this
+project. Read both before proposing any new reward variant or training run.
+
+**1. Adding rewards to map direct behavior is wrong, and this project is
 way less simple than the V0.3.x approach allowed.** This was the
 explicit lesson Colin surfaced 2026-06-05 after five reward versions of
 knob-turning failed. When tempted to add a new constant to fix a
 specific failure mode, stop and ask whether the right move is
 restructuring the reward landscape instead. Curves and structure beat
-constants and knobs.
+constants and knobs. Full reasoning in `notes/design-log.md` under
+"Day 3 — V0.4".
 
-Full reasoning in `notes/design-log.md` under "Day 3 — V0.4". Read that
-section before proposing any new reward variant.
+**2. Always run a low-entropy diagnostic probe BEFORE committing to a
+full training run on any new reward variant.** Set `entropy_coef:
+0.005` (or lower), run for ~30M steps, watch a checkpoint at iter
+3000-5000. If the policy commits to a degenerate strategy (e.g. Tail
+Whip lock-in), the reward landscape has a hole and you need to fix it
+before the full run. If the policy commits to a reasonable strategy,
+escalate. Low entropy makes degenerate equilibria visible fast;
+higher entropy hides them by keeping the policy noisy. This pattern
+was the lesson of V0.4 → V0.4.1 on 2026-06-05. Full reasoning under
+"Day 4". The detailed workflow lives below under "Diagnostic probe
+pattern."
 
 ## Where the load-bearing context lives
 
