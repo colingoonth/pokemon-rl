@@ -35,9 +35,26 @@ section before proposing any new reward variant.
 - Repo lives in `/scratch/guenthc1/pokemon-rl/` on ELSA (NOT home dir — home is small)
 - Run outputs go to `/scratch/guenthc1/pokemon-rl/runs/<run_name>/`
 - L40S nodes: `gpu-node001-005` (hpe_l40s) + `gpu-node019-021` (l40s). 8 total, 32 cores each, 4 GPUs each.
-- **Queue is heavily contested by long MD-simulation jobs** (29-day walltimes). 4-GPU full-node requests can sit pending for *days*. 3-GPU and 1-GPU jobs typically schedule in seconds because L40S nodes are frequently partially-allocated.
-- See `notes/design-log.md` Day 2 section on the multi-node DDP attempt for the full queue-contention story and why multi-node was abandoned.
+- **Queue contention varies day-to-day.** Sometimes 4-GPU lands immediately; sometimes it sits in PD(Resources) because long MD-simulation jobs (29-day walltimes) hold partial node allocations across all 8 L40S nodes. *Always check before submitting* — don't assume any specific GPU count will schedule.
+- See `notes/design-log.md` Day 2 section on the multi-node DDP attempt for the full multi-node-vs-queue story.
 - PyBoy is the actual bottleneck (single-threaded per env). 4×L40S only gets 1.47× over 1×L40S. Don't expect linear GPU scaling.
+
+### Check cluster state before submitting
+
+Before any new submission, run this to see what's free and pick the largest GPU count that will land quickly:
+
+```sh
+ssh elsa.hpc.tcnj.edu "for n in gpu-node00{1..5} gpu-node019 gpu-node020 gpu-node021; do echo -n \"\$n: \"; scontrol show node \$n | grep -oE 'AllocTRES=[^ ]+' | head -1; done"
+```
+
+Read the `gres/gpu=N` field per node. Free GPUs per node = `4 - N`. Decision rule:
+
+- **Any node with 4 free GPUs (AllocTRES `gres/gpu=0`):** submit the 4-GPU sbatch (`train_brock_*_ddp4.sbatch`). Best throughput.
+- **Any node with 3 free GPUs (`gres/gpu=1`):** submit the 3-GPU sbatch (`train_brock_*_ddp3.sbatch`). ~78% throughput of 4-GPU, schedules immediately.
+- **Any node with 1-2 free GPUs:** drop to 1-GPU (`train_brock_*_1gpu.sbatch`). ~75% throughput of single 4-GPU job, definitely schedules.
+- **Nothing free:** check SLURM start estimate with `squeue -u guenthc1 --start`. If it's more than a few hours out, drop to a smaller GPU count.
+
+The N-GPU variants of every reward config + sbatch are kept in parallel for this reason. Don't pick the GPU count by default — pick it by current availability.
 
 ## Key workflows (commands you'll use)
 
@@ -69,11 +86,16 @@ uv run python -m pokerl.eval.watch \
 1. Add a new `RewardV0_X_Y` class in `pokerl/env/rewards.py` inheriting
    from the current latest. Set ONLY the constants that change.
 2. Register it in `REWARD_REGISTRY` at the bottom of `rewards.py`.
-3. Create a new yaml under `configs/elsa_brock_<variant>_ddp3.yaml`
-   (3-GPU is the practical default given queue contention). Set
-   `reward_class:` to the new class name.
-4. Create a sbatch in `slurm/` by copying the latest working sbatch and
-   updating `--job-name`, the RUN_DIR path, and `--config`.
+3. Create the config under `configs/elsa_brock_<variant>_<scale>.yaml`
+   where `<scale>` is `ddp4`, `ddp3`, or `1gpu` depending on what
+   you're going to submit. If you want to keep options open, create
+   all three (sed-substitute n_envs/minibatch from the v0.4 baseline).
+   Set `reward_class:` to the new class name.
+4. Create matching sbatch(es) in `slurm/` by copying the latest working
+   sbatch at the target GPU count and updating `--job-name`, the
+   RUN_DIR path, and `--config`. Don't decide GPU count in advance —
+   check cluster state at submission time and pick the largest
+   variant that will schedule fast (see "Check cluster state" above).
 5. Verify locally: `uv run pytest tests/ -x` (all 52 tests must pass)
    and `uv run python -c "from pokerl.env.rewards import get_reward_cls; ..."`
    to confirm the class is registered.
@@ -100,7 +122,8 @@ ssh elsa.hpc.tcnj.edu "scancel <jobid>"
 
 ## What NOT to do
 
-- Don't propose multi-node DDP without re-reading `notes/design-log.md` Day 2. It's been scoped, scaffolded, and abandoned with reasoning. Re-litigate only if cluster contention has materially eased (check L40S availability via `sinfo`).
+- Don't propose multi-node DDP without re-reading `notes/design-log.md` Day 2. It's been scoped, scaffolded, and abandoned with reasoning. The expected speedup is modest (~1.7× at 2N) since PyBoy is the bottleneck, and the rendezvous setup is fragile. Re-litigate only if there's a specific reason single-node ceiling actually matters for the experiment.
+- Don't hardcode "4-GPU is dead" or "single-GPU is the default." Pick scale by current cluster state at submission time — see "Check cluster state" above.
 - Don't bump a single reward constant to fix a behavior. See "The discipline" above.
 - Don't run agents (Plan, designer, etc) when a skill covers the task. Most agents have a corresponding skill in `~/.claude/skills/`. Skills are the default.
 - Don't run librarian-documentation mid-session. Only at session end, and only via the agent (`/agent-librarian` or the `librarian-documentation` skill), never inline.
