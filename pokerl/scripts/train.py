@@ -115,6 +115,7 @@ def main() -> None:
             frame_stack=4,
             async_envs=cfg.async_envs,
             reward_cls=reward_cls,
+            frame_skip=cfg.frame_skip,
         )
 
     try:

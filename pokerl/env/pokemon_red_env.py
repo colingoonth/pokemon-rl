@@ -57,12 +57,14 @@ class PokemonRedEnv(gym.Env):
         headless: bool = True,
         max_steps: int = 4096,
         reward: Reward | None = None,
+        frame_skip: int = 1,
     ) -> None:
         super().__init__()
         self.rom_path = Path(rom_path)
         self.state_path = Path(state_path)
         self.max_steps = max_steps
         self.reward_fn: Reward = reward if reward is not None else RewardV0_1()
+        self.frame_skip = max(1, int(frame_skip))
 
         if not self.rom_path.exists():
             raise FileNotFoundError(f"ROM not found: {self.rom_path}")
@@ -109,20 +111,20 @@ class PokemonRedEnv(gym.Env):
         self, action: int
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         name = ACTIONS[int(action)]
-        if name != "noop":
-            self.pyboy.button_press(name)
-
         running = True
-        for frame in range(FRAMES_PER_STEP):
-            if name != "noop" and frame == BUTTON_HOLD_FRAMES:
+        for _ in range(self.frame_skip):
+            if name != "noop":
+                self.pyboy.button_press(name)
+            for frame in range(FRAMES_PER_STEP):
+                if name != "noop" and frame == BUTTON_HOLD_FRAMES:
+                    self.pyboy.button_release(name)
+                running = self.pyboy.tick()
+                if not running:
+                    break
+            if name != "noop":
                 self.pyboy.button_release(name)
-            running = self.pyboy.tick()
             if not running:
                 break
-        # Defensive release in case we broke out of the loop before reaching
-        # BUTTON_HOLD_FRAMES — leaves the emulator in a clean state.
-        if name != "noop":
-            self.pyboy.button_release(name)
 
         self._steps += 1
         obs = self._obs()

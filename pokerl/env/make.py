@@ -25,8 +25,9 @@ def make_env(
     max_steps: int = 4096,
     frame_stack: int = 4,
     reward: Reward | None = None,
+    frame_skip: int = 1,
 ) -> gym.Env:
-    env_kwargs: dict = {"headless": headless, "max_steps": max_steps, "reward": reward}
+    env_kwargs: dict = {"headless": headless, "max_steps": max_steps, "reward": reward, "frame_skip": frame_skip}
     if rom_path is not None:
         env_kwargs["rom_path"] = rom_path
     if state_path is not None:
@@ -46,6 +47,7 @@ def make_vec_env(
     frame_stack: int = 4,
     reward_cls: Callable[[], Reward] = RewardV0_1,
     async_envs: bool = False,
+    frame_skip: int = 1,
 ) -> VectorEnv:
     """Construct a vectorized env with `n_envs` parallel PokemonRed instances.
 
@@ -68,6 +70,7 @@ def make_vec_env(
                 max_steps=max_steps,
                 frame_stack=frame_stack,
                 reward=reward_cls(),
+                frame_skip=frame_skip,
             )
         return thunk
 
