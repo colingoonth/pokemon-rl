@@ -1111,3 +1111,298 @@ land on Tackle and clear the bootstrap, V0.4.2 was the right fix.
 If all three fail in different ways, that's strong evidence the
 in-battle problem is beyond reward design and we need to look at
 the observation/action space (cursor visibility, action masking).
+
+
+## 2026-06-09 — Day 6: VCL pivot, async hang root cause, infra wins
+
+### The gap
+
+Day 5 (6/5) ended with V0.4.2 staged and the QOS block in place.
+Email to Sean Sivy went out the same afternoon. Nothing happened
+on the cluster front for the next three days. I didn't fight it,
+mostly because I was burned out on infra after the V0.4 → V0.4.1 →
+V0.4.2 sprint, and partly because the right move was to wait for
+Sean to get back rather than escalate.
+
+Today (6/9) Sean responded and Brad Mott (the RL contact Jessica
+suggested at NCSU) also responded. Two parallel emails, both
+moving things forward.
+
+### Brad's reply (RL guidance)
+
+I'd asked Brad about the state-based curve approach (the V0.4
+philosophy shift away from action-specific rewards). His response:
+the move toward broader state-based signals is sensible, and the
+main thing to watch for is one reward component dominating the
+others. He pointed me at the IEEE Conference on Games proceedings
+for similar work.
+
+The reward-dominance warning is exactly what's been biting me —
+flee-as-win dominated V0.2.1, walking-left dominated V0.2 entropy
+collapse, Tail Whip dominated V0.4. Each one was a different
+component winning the gradient race. Hearing it framed as a known
+RL failure mode rather than my own confusion was useful.
+
+Brad also approved using NCSU's VCL for the Pokemon project while
+the TCNJ cluster is blocked. This was the actual unblock — it
+meant I had a path to keep training without waiting for Sean.
+
+### Sean's reply (cluster ops)
+
+Sean confirmed the QOS profiles are being restructured per-lab /
+per-class. He asked which faculty member I'm working with on this
+project. The honest answer is: I do research with Dr. Yoon, but
+the Pokemon RL work is personal portfolio, not a lab project.
+Another faculty member had told me informally that personal use
+of ELSA was fine, but that wasn't an official sponsorship. I told
+Sean that directly in the reply and let him decide whether it
+fits the new framework.
+
+He also flagged two operationally useful things:
+1. My L40S jobs were using <1GB VRAM. He suggested the GTX 1080Ti
+   nodes (3 × 8 GPUs, 11GB each, infrequently used). This is
+   correct — the bottleneck is PyBoy CPU, not VRAM. 11GB is plenty
+   for a tiny policy network.
+2. A pre-empt queue if my code supports check-pointing. I said
+   yes (periodic model saves exist) and we'd follow up on whether
+   a proper SIGTERM handler is in place before committing.
+
+Net: ELSA is potentially unblocking on 1080Ti + pre-empt, but
+that's a few days out at best. VCL is available now.
+
+### Pivot to VCL (and why VCL specifically)
+
+VCL is NC State's Virtual Computing Lab — reserve a VM, get a
+GPU + CPU for up to 10 hours per reservation. The image I
+reserved was Ubuntu 22 + CUDA + RTX 2080 Ti. 16 cores, 88GB RAM,
+11GB VRAM.
+
+Why VCL over alternatives:
+- Brad gave explicit permission. The institutional question is
+  resolved without ambiguity.
+- Free for NCSU students. Local-first ML rule still holds.
+- Roughly the same single-GPU specs as ELSA's 1080Ti suggestion
+  Sean made, but available right now instead of in a few days.
+- The 10-hour reservation limit is a real constraint but
+  workable with checkpointing.
+
+Tradeoffs accepted:
+- Single node only — no DDP, no multi-GPU. Per the Day 2 multi-
+  node analysis this is fine; 4xL40S only got 1.47x over single
+  L40S because PyBoy is the bottleneck.
+- VCL is a desktop VM with Xorg running. This turned out to
+  matter — see the async hang section below.
+- No SLURM — runs are direct python invocations in tmux. The
+  sbatch infrastructure doesn't translate.
+
+### Setting up the repo on VCL
+
+uv install worked clean. The repo synced via rsync from local
+since the github repo is private and the VCL VM didn't have
+credentials. State files (`states/blue_fight.state` etc.) had to
+be rsynced separately because they're gitignored.
+
+The smoke test (sync envs, 2 envs) ran fine at ~130-146 sps and
+confirmed the env code worked unchanged on VCL.
+
+### Branch strategy: vcl, elsa, main
+
+Created a `vcl` and `elsa` branch off main. The motivation: the
+two cluster contexts have different operational shapes (SLURM vs
+direct invocation, multi-GPU configs vs single-GPU, sbatch
+scripts vs tmux launchers). Trying to keep all of it on main
+would bloat the configs/ directory and confuse the next session.
+
+On the `vcl` branch:
+- Removed `slurm/` directory entirely
+- Removed all `elsa_brock_*` configs
+- Removed `sync_from_elsa.sh`
+- Added `setup_vcl.sh` (one-time env install), `launch_vcl.sh`
+  (tmux + uv wrapper), `sync_from_vcl.sh` (pull runs back local)
+- Replaced README with a VCL-focused version
+- Only `vcl_*` and `dev_local` configs remain
+
+`elsa` branch keeps the existing infrastructure as-is. `main` is
+shared code (envs, rewards, PPO). Reward changes land on main
+first, then merge into whichever cluster branch is active.
+
+This is heavier than necessary for one project, but I expect this
+"two cluster contexts" pattern to recur (REU has VCL, TCNJ has
+ELSA, future projects will have something else). The branch
+split makes the operational context explicit.
+
+### First run on VCL (sync envs, slow but working)
+
+V0.4.2 center arm, n_envs=12 sync, frame_skip=1. ~150-175 sps
+after JIT warm-up. About half the throughput of single-GPU ELSA
+async, but enough to make real progress.
+
+Got to iter 300 by 20:13 (about 90 minutes of training). Pulled
+the iter 300 checkpoint and watched it locally. Behavior was
+healthy for an early checkpoint:
+
+- Resolved the rival battle (didn't get stuck in menu loops)
+- Long exploration phase in Oak's lab pressing A on objects
+- Eventually navigated through the lab door
+- Triggered a wild encounter in the grass after leaving
+
+No obvious degenerate behavior. BATTLE_STALL didn't visibly break
+anything. The "presses A on everything" pattern is mild noise
+from H=1.92, not a pathology. Iter 300 is far from the real
+diagnostic window (iter 3000-5000) but the sanity check passed.
+
+### Async envs hung — the actual story
+
+The original config used `async_envs: true` because that's what
+ELSA used. On VCL it just hung forever. 12 worker subprocesses
+spawned and consumed 50% CPU each, but the parent process never
+received the first observation.
+
+First thing I checked was `/dev/shm` — the standard PyTorch
+multiprocessing IPC channel, often undersized on VMs. It was 45GB.
+Not the issue.
+
+CUDA initialization order was the next suspicion — the standard
+trap is fork-after-CUDA-init. Checked the train.py + ppo.py
+ordering: `env_fn()` runs on line 128 of train.py, but CUDA
+device + ActorCritic.to(device) doesn't happen until ppo.py
+line 148+. So at the moment workers spawn, CUDA has not been
+touched in the parent. Not the issue either.
+
+The clue was the workers being at 50% CPU but the parent receiving
+nothing. The workers were doing work, they just weren't
+communicating it back. That pointed at something blocking
+during worker startup before they reached the IPC loop.
+
+Looked at PokemonRedEnv `__init__`: PyBoy is created with
+`window="null"` (headless), so no SDL2 window should open. But
+pysdl2-dll is imported at module level (the warning is visible
+in every log). On VCL the host has Xorg running because it's a
+desktop image. The hypothesis: SDL2 in subprocess context tries
+to connect to the X display for initialization even when PyBoy
+doesn't open a window, and on the VCL VM that connection blocks
+or fails silently.
+
+Fix: set `SDL_VIDEODRIVER=dummy` in the launch env. This forces
+SDL2 to use a no-op video driver that doesn't touch X11.
+
+Smoke test (2 envs async, SDL_VIDEODRIVER=dummy): clean, ~210-249
+sps. Ran the full 12-env async config: **963 sps at iter 10**.
+About 6x the sync throughput.
+
+### Why this matters operationally
+
+The async fix turned VCL from "barely fits a meaningful run in
+10 hours" into "diagnostic window in ~90 minutes." At 963 sps
+with 3072 steps per iter:
+
+- iter 100: ~5 minutes
+- iter 1000: ~50 minutes
+- iter 3000 (lower bound of diagnostic window): ~2.5 hours
+
+That's well inside the 10-hour reservation budget. The async fix
+is the difference between "useful for diagnostic" and "barely
+usable for sanity check."
+
+For comparison: the old ELSA DDP4 metrics from V0.2 show ~1780
+sps. CLAUDE.md notes DDP4 was only 1.47x over single L40S, so
+single L40S async was roughly 1210 sps. VCL 2080 Ti async at 963
+sps is in the same order of magnitude as ELSA single-GPU async,
+not catastrophically slower. The 2080 Ti is a meaningfully
+weaker GPU than the L40S, but PyBoy bottleneck dominates so the
+GPU spec gap doesn't show up at full scale.
+
+### Frame skip code (added, not yet enabled)
+
+Per the optimization plan, I added a `frame_skip` parameter to
+PPOConfig and PokemonRedEnv. The env's step() now repeats the
+24-frame button-press loop N times before reading reward. Default
+is 1 (current behavior). Tests pass.
+
+I didn't enable frame_skip on the resume run because the iter 300
+policy was trained with frame_skip=1; switching mid-training
+changes the effective env from the policy's perspective. Cleaner
+to test frame_skip on a fresh run.
+
+Next chance to validate frame skip: probably a separate VCL run
+or after the resume run finishes.
+
+### Why no Gambatte backend
+
+The plan included a third optimization: replace PyBoy with
+Gambatte (C++ Game Boy emulator, much faster per tick). Researched
+it before committing. Findings:
+
+- No clean pip-installable Python binding for Gambatte exists.
+  The two viable paths are `stable-retro` (broken on Apple Silicon
+  for Game Boy core) and `pdretro` (new, single author, RAM
+  reads unconfirmed).
+- No existing Pokemon RL project has switched off PyBoy. PufferAI's
+  pokegym hits hundreds of thousands of sps with PyBoy across
+  parallel envs.
+
+Conclusion: scope Gambatte out. Multi-day yak-shave for unclear
+additional gain once async is fixed. The async fix was the real
+unlock; the per-instance emulator speed wasn't the binding
+constraint.
+
+### Resuming from iter 300
+
+After confirming the async fix worked, killed the new from-scratch
+async run and relaunched with `--resume runs/.../iter_000300.pt`.
+This loads the policy weights from iter 300 (the watched
+checkpoint) and continues training with the faster setup.
+
+The new run is logging to `runs/vcl_brock_v0_4_2_center_1gpu_resume/
+train.log`. iter 10 of the resume showed mean_return +22.67 vs
++5.77 in the earlier sync run at iter 170 — the policy from iter
+300 is meaningfully more committed than what we'd been seeing at
+iter 170.
+
+### Operational decisions / why
+
+A few changes that went into the project today, briefly justified:
+
+1. **`SDL_VIDEODRIVER=dummy` in launch_vcl.sh**: Forces SDL2 away
+   from X11. Required on VCL because of the Xorg desktop. Won't
+   hurt anywhere else (ELSA doesn't have an X server to connect
+   to in the first place, so the env var is a no-op).
+2. **`PYTHONUNBUFFERED=1` in launch_vcl.sh**: First sync smoke
+   test produced no output for minutes because Python buffered
+   stdout. Forced unbuffered output so the launch log is
+   immediately useful for debugging.
+3. **`async_envs: true` re-enabled in VCL config**: Now that the
+   SDL fix is in place, no reason to stay on sync. The 6x
+   throughput is worth more than the slight cognitive overhead
+   of remembering the env var.
+4. **`frame_skip: int = 1` field on PPOConfig**: Adds the
+   parameter without changing default behavior. Lets us A/B test
+   frame skip on a fresh run without risking the resume.
+5. **Periodic check via cron**: 30-min checks set up while away
+   from the machine. Reports the latest iter / sps / mean_return
+   / entropy. Catches process death or obvious regression before
+   the next time I'm back at the machine.
+
+### Open thread
+
+- Wait for the resume run to hit iter 3000-5000 (diagnostic
+  window) and watch a checkpoint. That's the actual V0.4.2
+  verdict: did BATTLE_STALL fix the menu-stall, did the
+  recalibrated DAMAGE_QUAD produce committed combat, or did
+  something else come up.
+- Validate frame_skip on a fresh run once the resume is past
+  the diagnostic window. If frame_skip=4 gives clean 4x on top
+  of the 963 sps baseline (target: ~3000-4000 sps), that's the
+  emulator-bottleneck fix and matches single L40S DDP4 throughput
+  on a single 2080 Ti.
+- Sean still owes a final answer on whether the personal-project
+  use of ELSA fits the new QOS framework. Whatever he says, the
+  vcl branch is now a real fallback so ELSA being intermittent
+  is no longer blocking.
+- Reward-version writeup (`notes/reward-versions.md`) is still
+  the canonical portfolio source. Today's work doesn't change
+  the reward arc, just the infrastructure. If anything, the
+  pivot story is a worth-including chapter in a "what I learned
+  doing this" section of the writeup: production RL is mostly
+  infra debugging, and one env var stood between "barely usable"
+  and "throughput parity with the institutional cluster."
