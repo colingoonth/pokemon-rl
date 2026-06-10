@@ -854,6 +854,11 @@ class RewardV0_3_4(RewardV0_3_3):
         self._last_pokedex_count = 0
         self._last_pokeballs = 0
         self._steps_since_new_tile = 0
+        # Reward attribution: per-step contribution breakdown.
+        # Watchers (eval/watch.py) read this after each compute() to
+        # aggregate which reward components fired. Reset at the top of
+        # every compute().
+        self.last_components: dict[str, float] = {}
 
     def reset(self, mem) -> None:
         super().reset(mem)
@@ -861,8 +866,25 @@ class RewardV0_3_4(RewardV0_3_3):
         self._last_pokedex_count = rm.pokedex_owned_count(mem)
         self._last_pokeballs = rm.bag_item_quantity(mem, rm.ITEM_POKEBALL_ID)
         self._steps_since_new_tile = 0
+        self.last_components = {}
+
+    def _track(self, name: str, value: float) -> float:
+        """Record a reward contribution under `name` and return it
+        unchanged. Use as: `reward += self._track("EXPLORE", coef * x)`.
+        """
+        if value != 0.0:
+            self.last_components[name] = (
+                self.last_components.get(name, 0.0) + value
+            )
+        return value
 
     def compute(self, mem) -> float:
+        # Reset attribution dict for this step. Parent compute() runs
+        # before our local tracking, so anything pre-V0_3_4 goes into
+        # INHERITED (a single bucket). Tracked components below add to
+        # last_components individually.
+        self.last_components = {}
+
         # Snapshot pre-state for delta-based custom rewards. super() will
         # update these in-place during its compute pass, so we need values
         # from BEFORE the call.
@@ -873,27 +895,35 @@ class RewardV0_3_4(RewardV0_3_3):
         prev_in_battle = self._last_in_battle
 
         reward = super().compute(mem)
+        if reward != 0.0:
+            self.last_components["INHERITED"] = reward
 
         # ---- LEVEL: log_6(new_level) per unit gained ----
         level_total_now = sum(rm.party_levels(mem))
         if level_total_now > prev_level_total:
             for new_level in range(prev_level_total + 1, level_total_now + 1):
                 if new_level > 1:
-                    reward += math.log(new_level) / math.log(6)
+                    reward += self._track(
+                        "LEVEL", math.log(new_level) / math.log(6)
+                    )
 
         # ---- CATCH: log_2.5(new_pokedex_count) per pokedex increment ----
         pokedex_now = rm.pokedex_owned_count(mem)
         if pokedex_now > self._last_pokedex_count:
             for new_count in range(self._last_pokedex_count + 1, pokedex_now + 1):
                 if new_count > 1:
-                    reward += math.log(new_count) / math.log(2.5)
+                    reward += self._track(
+                        "CATCH", math.log(new_count) / math.log(2.5)
+                    )
             self._last_pokedex_count = pokedex_now
 
         # ---- EXPLORE: 0.0001 * N^1.001 per new tile ----
         visited_now = len(self._visited)
         if visited_now > prev_visited_count:
             for n in range(prev_visited_count + 1, visited_now + 1):
-                reward += self.EXPLORE_COEF * (n ** self.EXPLORE_EXPONENT)
+                reward += self._track(
+                    "EXPLORE", self.EXPLORE_COEF * (n ** self.EXPLORE_EXPONENT)
+                )
             self._steps_since_new_tile = 0
         else:
             self._steps_since_new_tile += 1
@@ -902,7 +932,9 @@ class RewardV0_3_4(RewardV0_3_3):
         badge_count_now = rm.badges_count(mem)
         if badge_count_now > prev_badge_count:
             for new_count in range(prev_badge_count + 1, badge_count_now + 1):
-                reward += self.BADGE_COEF * (new_count ** self.BADGE_EXPONENT)
+                reward += self._track(
+                    "BADGE", self.BADGE_COEF * (new_count ** self.BADGE_EXPONENT)
+                )
 
         # ---- BEAT_MON: capped 5/area, falling log_2.5(7 - kill_n) ----
         # Detect the same trigger as base BEAT_MON: enemy mon HP just hit 0
@@ -915,7 +947,9 @@ class RewardV0_3_4(RewardV0_3_3):
             kill_n = self._kills_per_area.get(current_map, 0) + 1
             self._kills_per_area[current_map] = kill_n
             if kill_n <= self.KILL_CAP_PER_AREA:
-                reward += math.log(7 - kill_n) / math.log(2.5)
+                reward += self._track(
+                    "BEAT_MON", math.log(7 - kill_n) / math.log(2.5)
+                )
 
         # ---- POKEBALL_BUY: 5 * max(0, 1 - n/20) per purchase ----
         pokeballs_now = rm.bag_item_quantity(mem, rm.ITEM_POKEBALL_ID)
@@ -924,12 +958,12 @@ class RewardV0_3_4(RewardV0_3_3):
                 bonus = self.POKEBALL_BUY_COEF * max(
                     0.0, 1.0 - owned_before / self.POKEBALL_BUY_CAP
                 )
-                reward += bonus
+                reward += self._track("POKEBALL_BUY", bonus)
         self._last_pokeballs = pokeballs_now
 
         # ---- STUCK: -0.005/step after 200 steps with no new tile ----
         if self._steps_since_new_tile > self.STUCK_NO_TILE_THRESHOLD:
-            reward += self.STUCK_PENALTY_PER_STEP
+            reward += self._track("STUCK", self.STUCK_PENALTY_PER_STEP)
 
         return reward
 
@@ -981,7 +1015,9 @@ class RewardV0_4_1(RewardV0_4_0):
             hp_frac = cur / mx
             delta = hp_frac - prev_hp_frac
             if delta < 0 and self.DAMAGE_QUAD_COEF > 0:
-                reward -= (delta ** 2) * self.DAMAGE_QUAD_COEF
+                reward += self._track(
+                    "DAMAGE_QUAD", -(delta ** 2) * self.DAMAGE_QUAD_COEF
+                )
 
         return reward
 
@@ -1065,7 +1101,9 @@ class RewardV0_4_2_center(RewardV0_4_1):
             else:
                 self._battle_stall_counter += 1
                 if self._battle_stall_counter > self.BATTLE_STALL_THRESHOLD:
-                    reward += self.BATTLE_STALL_COEF
+                    reward += self._track(
+                        "BATTLE_STALL", self.BATTLE_STALL_COEF
+                    )
         else:
             self._battle_stall_counter = 0
 

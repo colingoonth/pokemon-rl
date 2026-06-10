@@ -77,6 +77,11 @@ def main() -> None:
 
     total_reward = 0.0
     tile_count_start = env.unwrapped.reward_fn.unique_tiles_visited  # type: ignore[attr-defined]
+    # Reward attribution aggregation.
+    # Components: cumulative sum per named component.
+    # Fires: count of steps that contributed > 0 (negative or positive).
+    comp_total: dict[str, float] = {}
+    comp_fires: dict[str, int] = {}
     start = time.time()
 
     for step in range(args.steps):
@@ -90,6 +95,15 @@ def main() -> None:
 
         obs, reward, terminated, truncated, _ = env.step(action)
         total_reward += float(reward)
+
+        # Aggregate reward attribution. Reward classes that support the
+        # last_components dict (V0.4.0+) populate it on each compute().
+        rf = env.unwrapped.reward_fn  # type: ignore[attr-defined]
+        components = getattr(rf, "last_components", None)
+        if components:
+            for name, val in components.items():
+                comp_total[name] = comp_total.get(name, 0.0) + val
+                comp_fires[name] = comp_fires.get(name, 0) + 1
 
         if args.record and step % 4 == 0:
             frames.append(env.render())
@@ -105,6 +119,24 @@ def main() -> None:
           f"({(step + 1) / elapsed:.1f} steps/s)")
     print(f"Total return:            {total_reward:+.3f}")
     print(f"Unique tiles visited:    {tile_count_end - tile_count_start + 1}")
+
+    if comp_total:
+        print()
+        print("=== Reward attribution ===")
+        # Sort by absolute magnitude so the loudest components surface first.
+        ordered = sorted(comp_total.items(), key=lambda kv: -abs(kv[1]))
+        name_w = max(len(n) for n, _ in ordered)
+        attrib_sum = 0.0
+        for name, total in ordered:
+            fires = comp_fires.get(name, 0)
+            attrib_sum += total
+            share = (total / total_reward * 100) if total_reward != 0 else 0.0
+            print(f"  {name:<{name_w}}  {total:+10.3f}  "
+                  f"({fires:>5} fires, {share:+6.1f}% of total)")
+        print(f"  {'sum':<{name_w}}  {attrib_sum:+10.3f}")
+        residual = total_reward - attrib_sum
+        if abs(residual) > 1e-4:
+            print(f"  {'unattributed':<{name_w}}  {residual:+10.3f}")
     if args.record:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         out = OUT_DIR / "watch_rollout.gif"
