@@ -1,0 +1,27 @@
+# V0.4.3 dense story arm — VCL single GPU (RTX 2080 Ti, 16 cores)
+#   RewardV0_4_3_dense: one-shot +1/event-flag-bit, masked, capped +40/episode.
+#   Fills the V0.4.2 milestone hole (no story signal Pallet->badge 1) that
+#   left both V0.4.2 policies STUCK 73-82% of steps in 50k-step eval.
+# LOW-ENTROPY PROBE: entropy_coef 0.005 per CLAUDE.md discipline rule 2 —
+#   surface degenerate equilibria fast before a committed full run. Watch a
+#   checkpoint at iter 3000-5000.
+# A/B control vs vcl_v0_4_3_curated_1gpu: ONLY reward_class differs.
+run_name: vcl_v0_4_3_dense_probe
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 12
+n_steps: 256
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_4_3_dense

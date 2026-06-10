@@ -1187,6 +1187,136 @@ class RewardV0_4_2_harsh(RewardV0_4_2_center):
     LOSE_BATTLE = -15.0
 
 
+class RewardV0_4_3_dense(RewardV0_4_2_center):
+    """V0.4.3 (dense story arm): fill the V0.4.2 milestone hole with a
+    fine-grained per-event-flag gradient.
+
+    The V0.4 "full strip" zeroed FLAG_REWARD/NEW_MAP_REWARD (rewards.py
+    RewardV0_3_4), so V0.4.2 pays nothing for story progress between
+    leaving Pallet and the first badge. 50k-step evals of two fresh
+    V0.4.2 policies were STUCK 73-82% of steps with no positive attractor
+    to climb toward (EXPLORE ~0.04/episode, negligible). This arm restores
+    the missing attractor as STATE-based outcome supervision (consistent
+    with the V0.4 philosophy): +FLAG_BIT_REWARD the first time each
+    individual event-flag bit transitions 0->1 during an episode.
+
+    Anti-farm: each of the ~2560 bit-indices is paid at most once per
+    episode (`_rewarded_bits` mask, updated unconditionally so a bit that
+    sets / clears / re-sets is never paid twice), and total flag reward is
+    hard-capped per episode (FLAG_REWARD_EPISODE_CAP) so it stays
+    structurally sub-badge and cannot dominate combat/survival.
+
+    STUCK and entropy are deliberately UNCHANGED from V0.4.2 — this arm is
+    the clean A/B control against RewardV0_4_3_curated, which differs only
+    in the story-reward mechanism.
+    """
+
+    FLAG_BIT_REWARD = 1.0
+    FLAG_REWARD_EPISODE_CAP = 40.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rewarded_bits: set[int] = set()
+        self._flag_reward_accum = 0.0
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        # Pre-mask every flag already set at episode start (blue_fight.state
+        # has the rival battle done) so we only pay for in-episode progress.
+        self._rewarded_bits = rm.event_flag_bits_set(mem)
+        self._flag_reward_accum = 0.0
+
+    def compute(self, mem) -> float:
+        reward = super().compute(mem)
+
+        now = rm.event_flag_bits_set(mem)
+        new_bits = now - self._rewarded_bits
+        if new_bits and self._flag_reward_accum < self.FLAG_REWARD_EPISODE_CAP:
+            headroom = self.FLAG_REWARD_EPISODE_CAP - self._flag_reward_accum
+            pay = min(len(new_bits) * self.FLAG_BIT_REWARD, headroom)
+            self._flag_reward_accum += pay
+            reward += self._track("FLAG_BIT", pay)
+        # Mask unconditionally (even past the cap) so post-cap toggles can't
+        # be farmed on a later step.
+        self._rewarded_bits |= new_bits
+
+        return reward
+
+
+class RewardV0_4_3_curated(RewardV0_4_2_center):
+    """V0.4.3 (curated story arm): fill the V0.4.2 milestone hole with
+    chunky map-progression goals instead of per-flag signal.
+
+    Same diagnosis as RewardV0_4_3_dense, opposite mechanism: rather than
+    rewarding all ~2560 event bits, reward a small curated set of map-id
+    milestones (one-shot on first entry) plus a per-new-map bonus plus a
+    coarse popcount-delta flag proxy as intermediate gradient. Named
+    per-flag milestones (got-parcel, got-pokedex) are not used because
+    ram_map has no verified per-bit reader — map-ids are fully supported.
+
+    NOTE: NEW-map signal is implemented LOCALLY here (NEW_MAP_BONUS + own
+    `_seen_maps`) rather than by re-enabling the ancestor's NEW_MAP_REWARD
+    constant. The V0.2.2 NEW_MAP path still runs through super().compute()
+    and would double-count (and land in UNATTRIBUTED) if that constant were
+    set; keeping it at 0 and tracking our own keeps attribution clean.
+
+    STUCK and entropy are deliberately UNCHANGED from V0.4.2 (clean A/B
+    control vs RewardV0_4_3_dense).
+    """
+
+    NEW_MAP_BONUS = 3.0
+    # One-shot bonus on first entry to each curated story map (verified ids).
+    MILESTONE_MAP_BONUS = {
+        rm.MAP_ROUTE_1: 4.0,       # 0x0C — left Pallet, on the road
+        rm.MAP_VIRIDIAN_CITY: 6.0,  # 0x01 — reached the first city
+        rm.MAP_PEWTER_CITY: 10.0,  # 0x02 — through the forest, Brock's town
+        rm.MAP_PEWTER_GYM: 15.0,   # 0x36 — entered Brock's gym (V1 target)
+    }
+    FLAG_POPCOUNT_BONUS = 1.0      # per net-new event flag (high-water mark)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._seen_maps: set[int] = set()
+        self._fired_map_milestones: set[int] = set()
+        self._milestone_base_flagcount = 0
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        self._seen_maps = {rm.map_id(mem)}
+        self._fired_map_milestones = set()
+        # Only pay for flags set AFTER the start state.
+        self._milestone_base_flagcount = rm.event_flags_popcount(mem)
+
+    def compute(self, mem) -> float:
+        reward = super().compute(mem)
+
+        cur_map = rm.map_id(mem)
+
+        # ---- NEW_MAP: per previously-unseen map_id (one-shot) ----
+        if cur_map not in self._seen_maps:
+            self._seen_maps.add(cur_map)
+            reward += self._track("NEW_MAP", self.NEW_MAP_BONUS)
+
+        # ---- MILESTONE_MAP: curated story maps (one-shot) ----
+        if (cur_map in self.MILESTONE_MAP_BONUS
+                and cur_map not in self._fired_map_milestones):
+            self._fired_map_milestones.add(cur_map)
+            reward += self._track(
+                "MILESTONE_MAP", self.MILESTONE_MAP_BONUS[cur_map]
+            )
+
+        # ---- FLAG_PROGRESS: +1 per net-new event flag (high-water mark) ----
+        flags_now = rm.event_flags_popcount(mem)
+        if flags_now > self._milestone_base_flagcount:
+            gained = flags_now - self._milestone_base_flagcount
+            reward += self._track(
+                "FLAG_PROGRESS", self.FLAG_POPCOUNT_BONUS * gained
+            )
+            self._milestone_base_flagcount = flags_now
+
+        return reward
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1243,6 +1373,8 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_4_2_center": RewardV0_4_2_center,
     "RewardV0_4_2_gentle": RewardV0_4_2_gentle,
     "RewardV0_4_2_harsh": RewardV0_4_2_harsh,
+    "RewardV0_4_3_dense": RewardV0_4_3_dense,
+    "RewardV0_4_3_curated": RewardV0_4_3_curated,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,

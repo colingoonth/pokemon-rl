@@ -1,0 +1,26 @@
+# V0.4.3 curated story arm — VCL single GPU (RTX 2080 Ti, 16 cores)
+#   RewardV0_4_3_curated: NEW_MAP +3, curated map milestones (Route1 +4,
+#   Viridian +6, Pewter +10, Pewter Gym +15), +1/net event flag (popcount
+#   proxy). Chunky map-progression goals vs the dense per-flag gradient.
+# LOW-ENTROPY PROBE: entropy_coef 0.005 per CLAUDE.md discipline rule 2.
+#   Watch a checkpoint at iter 3000-5000.
+# A/B control vs vcl_v0_4_3_dense_1gpu: ONLY reward_class differs.
+run_name: vcl_v0_4_3_curated_probe
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 12
+n_steps: 256
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_4_3_curated

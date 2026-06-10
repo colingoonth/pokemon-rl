@@ -231,6 +231,26 @@ def event_flags_popcount(mem: MemoryView) -> int:
     return total
 
 
+def event_flag_bits_set(mem: MemoryView) -> set[int]:
+    """Set of global bit-indices currently set in the event-flag region.
+
+    Bit index = byte_offset * 8 + bit_within_byte, range [0, EVENT_FLAGS_BYTES*8).
+    Unlike event_flags_popcount (an aggregate that is non-monotone — some
+    script/menu bits in this region toggle off and back on), this exposes
+    WHICH individual flags are set, so a reward can pay for each newly-set
+    flag exactly once and mask it permanently against re-toggling.
+    """
+    out: set[int] = set()
+    for i in range(EVENT_FLAGS_BYTES):
+        b = mem[ADDR_EVENT_FLAGS_START + i]
+        if b:
+            base = i * 8
+            for bit in range(8):
+                if b & (1 << bit):
+                    out.add(base + bit)
+    return out
+
+
 def pokedex_owned_count(mem: MemoryView) -> int:
     """Number of species with their pokedex "owned" bit set. Squirtle is
     already #1 at the curriculum start state, so a fresh agent reads 1."""
