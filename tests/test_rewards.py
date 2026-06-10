@@ -683,3 +683,34 @@ def test_v27_wild_kill_pays_20():
     got = r.compute(mem)
     assert abs(got - (r.STEP_PENALTY + r.BEAT_MON_REWARD)) < 1e-9
     assert r.BEAT_MON_REWARD == 20.0
+
+
+# --- V0.4.4 PC_FIRST_VISIT heal-entry mixin ----------------------------------
+
+def test_v044_pc_first_visit_fires_once_on_center_entry():
+    """Entering a Pokecenter map pays PC_FIRST_VISIT exactly once; re-entry
+    (and staying) pays nothing. Verified on both A/B arms."""
+    from pokerl.env.rewards import RewardV0_4_4_dense, RewardV0_4_4_curated
+    pc = rm.MAP_VIRIDIAN_POKECENTER
+    for cls in (RewardV0_4_4_dense, RewardV0_4_4_curated):
+        r = cls()
+        r.reset(FakeMem(base_state(map_id=rm.MAP_ROUTE_1)))  # start outside a PC
+        # step in the overworld: no PC reward
+        r.compute(FakeMem(base_state(map_id=rm.MAP_ROUTE_1, x=9)))
+        assert "PC_FIRST_VISIT" not in r.last_components, cls.__name__
+        # enter the Center: fires once, +10
+        r.compute(FakeMem(base_state(map_id=pc)))
+        assert r.last_components.get("PC_FIRST_VISIT") == 10.0, cls.__name__
+        # still inside / re-enter: never pays again
+        r.compute(FakeMem(base_state(map_id=pc, x=9)))
+        assert "PC_FIRST_VISIT" not in r.last_components, cls.__name__
+
+
+def test_v044_pc_first_visit_premasked_if_started_in_center():
+    """Defensive: starting inside a PC pre-masks it (no free reward)."""
+    from pokerl.env.rewards import RewardV0_4_4_curated
+    pc = rm.MAP_VIRIDIAN_POKECENTER
+    r = RewardV0_4_4_curated()
+    r.reset(FakeMem(base_state(map_id=pc)))
+    r.compute(FakeMem(base_state(map_id=pc, x=9)))
+    assert "PC_FIRST_VISIT" not in r.last_components

@@ -539,6 +539,7 @@ class RewardV0_2_3(RewardV0_2_2):
                 if first_visit_now:
                     self._visited_pokecenters.add(current_map)
                     reward += self.PC_FIRST_VISIT
+                    self._attr_v022("PC_FIRST_VISIT", self.PC_FIRST_VISIT)
                 if heal_event_now:
                     if prev_total_max > 0:
                         prev_pct = prev_total / prev_total_max
@@ -1317,6 +1318,32 @@ class RewardV0_4_3_curated(RewardV0_4_2_center):
         return reward
 
 
+class RewardV0_4_4_dense(RewardV0_4_3_dense):
+    """V0.4.4 dense: V0.4.3 dense per-flag story reward + restored
+    PC_FIRST_VISIT (+10, one-shot per Pokecenter).
+
+    Fixes the heal-gate found 2026-06-10: both V0.4.3 arms stuck in a low-HP
+    forced-flee loop (single Pokemon, hurt on Route 1, can't switch, won't
+    path to the nurse). HEAL_QUAD only pays AFTER a heal completes, giving no
+    gradient toward the Center. This re-enables the V0.2.3 PC machinery
+    (entry detection, _visited_pokecenters, day-7 blackout suppression) that
+    the V0.4 strip zeroed (RewardV0_3_4 line ~878) — only the constant
+    changes, per the project discipline. HEAL_QUAD then pays the (near-full,
+    since it arrives low) heal on top. Tests whether unblocking healing lets
+    the dense story signal drive forward progress.
+    """
+    PC_FIRST_VISIT = 10.0
+
+
+class RewardV0_4_4_curated(RewardV0_4_3_curated):
+    """V0.4.4 curated: V0.4.3 curated map-milestone story reward + restored
+    PC_FIRST_VISIT (+10, one-shot per Pokecenter). A/B partner to
+    RewardV0_4_4_dense — differs ONLY in the story-reward mechanism; the heal
+    fix is identical. See RewardV0_4_4_dense for the heal-gate rationale.
+    """
+    PC_FIRST_VISIT = 10.0
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1375,6 +1402,8 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_4_2_harsh": RewardV0_4_2_harsh,
     "RewardV0_4_3_dense": RewardV0_4_3_dense,
     "RewardV0_4_3_curated": RewardV0_4_3_curated,
+    "RewardV0_4_4_dense": RewardV0_4_4_dense,
+    "RewardV0_4_4_curated": RewardV0_4_4_curated,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,

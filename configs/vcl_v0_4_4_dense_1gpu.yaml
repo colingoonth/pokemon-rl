@@ -1,0 +1,28 @@
+# V0.4.4 dense arm — VCL single GPU (RTX 2080 Ti, 16 cores)
+#   RewardV0_4_4_dense = V0.4.3 dense per-flag story reward + restored
+#   PC_FIRST_VISIT (+10, one-shot per Pokecenter). Fixes the heal-gate found
+#   2026-06-10: both V0.4.3 arms stuck in a low-HP forced-flee loop because
+#   the V0.4 strip removed the directional heal signal (HEAL_QUAD only pays
+#   after a heal completes).
+# entropy_coef 0.01 — normal/committed setting. A/B partner: curated arm,
+#   ONLY reward_class differs. Watch a checkpoint at iter 3000-5000:
+#   does PC_FIRST_VISIT fire + HEAL_QUAD climb + flee/STUCK drop?
+run_name: vcl_v0_4_4_dense
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 12
+n_steps: 256
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_4_4_dense
