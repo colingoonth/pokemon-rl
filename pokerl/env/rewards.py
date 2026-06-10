@@ -417,8 +417,25 @@ class RewardV0_2_2(RewardV0_2_1):
             elif self._enemy_killed_this_battle or self._pokemon_caught_this_battle:
                 pass  # already paid via BEAT_MON_REWARD or CATCH_REWARD
             else:
-                reward += self.FLEE_PENALTY
-                self._attr_v022("FLEE_PENALTY", self.FLEE_PENALTY)
+                # No kill, no catch, party_alive=True. Two cases:
+                # 1. Legitimate flee — HP whatever it was, possibly damaged
+                # 2. Single-step blackout — agent fainted and respawned at
+                #    full HP within one env step. End-of-step shows full HP
+                #    so party_alive is True, masking the loss.
+                # Distinguishing signal: party at FULL HP after a battle
+                # the agent didn't win is the blackout-respawn signature.
+                party_full = rm.party_hp(mem)
+                party_at_max = (
+                    len(party_full) > 0
+                    and all(c == m for c, m in party_full if m > 0)
+                )
+                was_alive_going_in = any(hp > 0 for hp in self._last_party_hp)
+                if was_alive_going_in and party_at_max:
+                    reward += self.LOSE_BATTLE
+                    self._attr_v022("LOSE_BATTLE", self.LOSE_BATTLE)
+                else:
+                    reward += self.FLEE_PENALTY
+                    self._attr_v022("FLEE_PENALTY", self.FLEE_PENALTY)
 
         # ----- Per-faint penalty -----
         for i in range(min(len(party_hp), len(self._last_party_hp))):
