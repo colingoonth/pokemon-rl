@@ -777,10 +777,14 @@ class RewardV0_3_3(RewardV0_3_1):
         self._last_hp_frac = (cur / mx) if mx > 0 else 0.0
 
     def compute(self, mem: MemoryView) -> float:
-        # Snapshot blackout flag before super().compute() clears it via the
-        # V0.2.3 PC heal/visit guard. Without this snapshot, blackout force-
-        # heals (0 -> full HP) would pay the quadratic reward.
+        # Snapshot blackout flag + in_battle BEFORE super().compute()
+        # clears them. The flag-based guard catches multi-step blackout
+        # sequences. The single-step guard below catches the case where
+        # the agent faints AND respawns within one env step — by the
+        # time super() runs, party HP is already full, so the V0_2_3
+        # `all_dead_now` snapshot never triggers _blackout_pending.
         was_blackout_pending = self._blackout_pending
+        prev_in_battle = self._last_in_battle
 
         reward = super().compute(mem)
 
@@ -789,7 +793,20 @@ class RewardV0_3_3(RewardV0_3_1):
         mx = sum(m for _c, m in party_hp)
         hp_frac = (cur / mx) if mx > 0 else 0.0
         delta = max(0.0, hp_frac - self._last_hp_frac)
-        if delta > 0 and self.HEAL_QUAD_COEF > 0 and not was_blackout_pending:
+
+        # Single-step blackout signature: battle just ended this step,
+        # agent is now on a PC map at full HP. This is a healed respawn —
+        # not a player-initiated PC heal (which happens with no battle
+        # transition) and not in-battle healing (which doesn't end battle).
+        in_battle_now = rm.in_battle(mem)
+        on_pc_map = rm.map_id(mem) in rm.POKECENTER_MAP_IDS
+        single_step_blackout = (
+            prev_in_battle != 0 and in_battle_now == 0
+            and on_pc_map and hp_frac >= 1.0
+        )
+
+        if (delta > 0 and self.HEAL_QUAD_COEF > 0
+                and not was_blackout_pending and not single_step_blackout):
             heal_val = (delta ** 2) * self.HEAL_QUAD_COEF
             reward += heal_val
             self._attr_v022("HEAL_QUAD", heal_val)
