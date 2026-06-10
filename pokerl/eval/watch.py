@@ -23,6 +23,7 @@ from torch.distributions import Categorical
 from pokerl.agent.networks import ActorCritic
 from pokerl.env.make import make_env
 from pokerl.env.pokemon_red_env import ACTIONS
+from pokerl.env.rewards import get_reward_cls
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CKPT = ROOT / "checkpoints" / "smoke.pt"
@@ -48,6 +49,10 @@ def parse_args() -> argparse.Namespace:
                    help="Override env start state. None = env default "
                         "(post_intro.state). Use this to eval a policy "
                         "from the same state it was trained on.")
+    p.add_argument("--reward-class", type=str, default="RewardV0_4_2_center",
+                   help="Reward class name. Must match the class the "
+                        "checkpoint was trained against — otherwise "
+                        "attribution and totals won't match training.")
     return p.parse_args()
 
 
@@ -67,8 +72,11 @@ def main() -> None:
     args = parse_args()
 
     headless = args.record or args.silent
+    reward_cls = get_reward_cls(args.reward_class)
     env = make_env(headless=headless, max_steps=args.steps + 1,
-                   frame_stack=4, state_path=args.state_path)
+                   frame_stack=4, state_path=args.state_path,
+                   reward=reward_cls())
+    print(f"Reward: {args.reward_class}")
     if not headless:
         # Throttle the SDL2 window to the requested multiple of real time.
         env.unwrapped.pyboy.set_emulation_speed(args.speed)
