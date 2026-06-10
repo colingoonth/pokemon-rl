@@ -307,6 +307,7 @@ class RewardV0_2_2(RewardV0_2_1):
         self._enemy_killed_this_battle = False
         self._pokemon_caught_this_battle = False
         self._battle_was_trainer = False
+        self._party_fainted_this_battle = False
         self._last_party_count = 0
         self._visited_maps: set[int] = set()
         self._caught_species: set[int] = set()
@@ -316,6 +317,7 @@ class RewardV0_2_2(RewardV0_2_1):
         self._enemy_killed_this_battle = False
         self._pokemon_caught_this_battle = False
         self._battle_was_trainer = False
+        self._party_fainted_this_battle = False
         self._last_party_count = rm.party_count(mem)
         self._visited_maps = {rm.map_id(mem)}
         self._caught_species = set()
@@ -361,6 +363,7 @@ class RewardV0_2_2(RewardV0_2_1):
             self._enemy_killed_this_battle = False
             self._pokemon_caught_this_battle = False
             self._battle_was_trainer = (in_battle_now == 2)
+            self._party_fainted_this_battle = False
             if in_battle_now == 1:
                 species = rm.enemy_mon_species(mem)
                 if species not in self._encountered_species:
@@ -418,19 +421,13 @@ class RewardV0_2_2(RewardV0_2_1):
                 pass  # already paid via BEAT_MON_REWARD or CATCH_REWARD
             else:
                 # No kill, no catch, party_alive=True. Two cases:
-                # 1. Legitimate flee — HP whatever it was, possibly damaged
-                # 2. Single-step blackout — agent fainted and respawned at
-                #    full HP within one env step. End-of-step shows full HP
-                #    so party_alive is True, masking the loss.
-                # Distinguishing signal: party at FULL HP after a battle
-                # the agent didn't win is the blackout-respawn signature.
-                party_full = rm.party_hp(mem)
-                party_at_max = (
-                    len(party_full) > 0
-                    and all(c == m for c, m in party_full if m > 0)
-                )
-                was_alive_going_in = any(hp > 0 for hp in self._last_party_hp)
-                if was_alive_going_in and party_at_max:
+                # 1. Legitimate flee — HP whatever it was, agent ran away
+                # 2. Blackout — agent fainted at some point during this
+                #    battle and respawned at full HP before battle_ended
+                #    was caught. `_party_fainted_this_battle` flag is
+                #    sticky across the battle so it survives the gap
+                #    between the faint step and the in_battle=0 step.
+                if self._party_fainted_this_battle:
                     reward += self.LOSE_BATTLE
                     self._attr_v022("LOSE_BATTLE", self.LOSE_BATTLE)
                 else:
@@ -442,6 +439,7 @@ class RewardV0_2_2(RewardV0_2_1):
             if self._last_party_hp[i] > 0 and party_hp[i] == 0:
                 reward += self.FAINT_PENALTY
                 self._attr_v022("FAINT_PENALTY", self.FAINT_PENALTY)
+                self._party_fainted_this_battle = True
         self._last_party_hp = party_hp
 
         # ----- Progression -----
