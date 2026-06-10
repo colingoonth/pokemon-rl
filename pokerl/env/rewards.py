@@ -794,15 +794,19 @@ class RewardV0_3_3(RewardV0_3_1):
         hp_frac = (cur / mx) if mx > 0 else 0.0
         delta = max(0.0, hp_frac - self._last_hp_frac)
 
-        # Single-step blackout signature: battle just ended this step,
-        # agent is now on a PC map at full HP. This is a healed respawn —
-        # not a player-initiated PC heal (which happens with no battle
-        # transition) and not in-battle healing (which doesn't end battle).
+        # Single-step blackout signature: battle just ended this step
+        # AND HP jumped to full in the same step (delta > 0.5). That's
+        # the respawn-at-full-HP pattern after a faint. The PC-map check
+        # would be cleaner, but the agent's first blackout sends it to
+        # the player's home (Pallet Town bedroom) — not a PC map — until
+        # it has visited a Pokemon Center for the first time.
+        # Player-initiated PC heals don't pass this check because they
+        # happen without a battle->overworld transition this step.
+        # In-battle item heals don't pass because in_battle stays nonzero.
         in_battle_now = rm.in_battle(mem)
-        on_pc_map = rm.map_id(mem) in rm.POKECENTER_MAP_IDS
         single_step_blackout = (
             prev_in_battle != 0 and in_battle_now == 0
-            and on_pc_map and hp_frac >= 1.0
+            and hp_frac >= 1.0 and delta > 0.5
         )
 
         if (delta > 0 and self.HEAL_QUAD_COEF > 0
