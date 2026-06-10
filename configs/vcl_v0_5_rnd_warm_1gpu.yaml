@@ -1,0 +1,44 @@
+# V0.5 RND — WARM arm — VCL single GPU (node .245).
+# Curiosity-driven exploration (Random Network Distillation) + thin extrinsic
+# skeleton (RewardV0_5_skeleton: heal/level/badges + 3 hard-gate flags; the
+# EXPLORE/STUCK tile-shaping is gone — RND replaces it). Built on the GAE
+# truncation/autoreset fix (day-8 audit).
+#
+# WARM-STARTED via --resume from a V0.4.5 checkpoint: the backbone + actor +
+# extrinsic critic transfer (a competent explorer that already reaches
+# Viridian); critic_int + the RND target/predictor init fresh (strict=False).
+#
+# A/B partner: vcl_v0_5_rnd_cold (identical config, launched WITHOUT --resume).
+# The only difference between the arms is warm vs cold init — that's the
+# experiment: does the inherited "march north" bias help (skills) or hurt
+# (won't backtrack) under curiosity?
+run_name: vcl_v0_5_rnd_warm
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 12
+n_steps: 256
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_5_skeleton
+
+# --- RND / curiosity ---
+rnd_enabled: true
+ext_coef: 2.0
+int_coef: 1.0
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_obs_norm_steps: 1024
+rnd_obs_clip: 5.0
+rnd_int_clip: 5.0

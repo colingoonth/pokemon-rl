@@ -1366,6 +1366,80 @@ class RewardV0_4_5_curated(RewardV0_4_4_curated):
     PC_FIRST_VISIT = 50.0
 
 
+class RewardV0_5_skeleton(RewardV0_4_2_center):
+    """V0.5: thin extrinsic skeleton for the RND / curiosity build.
+
+    The V0.5 pivot moves *exploration* off hand-engineered tile rewards and
+    onto an intrinsic curiosity signal (RND — computed in the PPO loop, not
+    here). So this reward keeps only the parts that are NOT exploration
+    shaping, and adds the true story gates as one-shot objective bonuses:
+
+      KEEP (inherited from V0.4.2_center):
+        - combat / survival: HEAL_QUAD, DAMAGE_QUAD, BATTLE_STALL, FAINT,
+          LOSE_BATTLE, FLEE. The agent still has to fight to reach Brock;
+          this layer was proven across V0.4.1/4.2 to kill the Tail-Whip
+          menu-stall. It is NOT path force-feeding — it teaches *fighting*.
+        - progression: LEVEL (log_6), BADGE (power-law). The "what."
+
+      ADD:
+        - three one-shot HARD-GATE bonuses on the forced path to Brock:
+          got Oak's Parcel -> got Pokedex (the forced Pallet backtrack) ->
+          beat Brock. Objectives, not paths. Curiosity finds *how*; these
+          mark *that* the milestone is worth something.
+
+      REMOVE vs V0.4.2:
+        - EXPLORE curve (EXPLORE_COEF -> 0): replaced by RND novelty. This
+          was the coordinate-exploration reward that "wanders forever, never
+          reaches Brock"; intrinsic curiosity replaces it.
+        - STUCK anti-camp penalty (-> 0): RND's decaying novelty handles
+          camping on its own, and the explicit penalty also punished the
+          legitimate south-bound parcel backtrack.
+
+    Gate bonuses fire exactly once per episode (tracked in _gates_paid),
+    are pre-masked in reset() so a warm-started / mid-game start state does
+    not re-pay past progress, and attribute via _track so they appear in the
+    watcher breakdown rather than UNATTRIBUTED.
+    """
+
+    EXPLORE_COEF = 0.0             # exploration is now RND's job
+    STUCK_PENALTY_PER_STEP = 0.0   # drop anti-camp penalty (it punished the backtrack)
+
+    # One-shot hard-gate bonuses (true objectives on the path to Brock).
+    # Tunable; chosen meaningfully above the per-step noise floor but rare
+    # (one-shot) so they don't dominate the dense combat/level signal.
+    GATE_GOT_OAKS_PARCEL = 10.0
+    GATE_GOT_POKEDEX     = 25.0    # the forced Pallet backtrack — hardest gate
+    GATE_BEAT_BROCK      = 50.0    # V1 goal
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._gates_paid: set[str] = set()
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        self._gates_paid = set()
+        # Pre-mask gates already satisfied at the start state so a warm-start
+        # or mid-game curriculum state doesn't pay for past progress.
+        if rm.got_oaks_parcel(mem):
+            self._gates_paid.add("GATE_GOT_OAKS_PARCEL")
+        if rm.got_pokedex(mem):
+            self._gates_paid.add("GATE_GOT_POKEDEX")
+        if rm.beat_brock(mem):
+            self._gates_paid.add("GATE_BEAT_BROCK")
+
+    def compute(self, mem) -> float:
+        reward = super().compute(mem)
+        for name, fired, amount in (
+            ("GATE_GOT_OAKS_PARCEL", rm.got_oaks_parcel(mem), self.GATE_GOT_OAKS_PARCEL),
+            ("GATE_GOT_POKEDEX",     rm.got_pokedex(mem),     self.GATE_GOT_POKEDEX),
+            ("GATE_BEAT_BROCK",      rm.beat_brock(mem),      self.GATE_BEAT_BROCK),
+        ):
+            if fired and name not in self._gates_paid:
+                self._gates_paid.add(name)
+                reward += self._track(name, amount)
+        return reward
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1428,6 +1502,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_4_4_curated": RewardV0_4_4_curated,
     "RewardV0_4_5_dense": RewardV0_4_5_dense,
     "RewardV0_4_5_curated": RewardV0_4_5_curated,
+    "RewardV0_5_skeleton": RewardV0_5_skeleton,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,

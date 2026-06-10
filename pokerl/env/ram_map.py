@@ -59,6 +59,20 @@ ADDR_EVENT_FLAGS_START = 0xD747
 ADDR_EVENT_FLAGS_END   = 0xD886  # inclusive
 EVENT_FLAGS_BYTES      = ADDR_EVENT_FLAGS_END - ADDR_EVENT_FLAGS_START + 1
 
+# Hard-gate story events on the path to Brock, as (byte_addr, bit) pairs.
+# Verified twice against pret/pokered constants/event_constants.asm AND
+# drubinstein/pokemonred_puffer data/events.py (both agree exactly):
+#   addr = 0xD747 + index//8,  bit = index%8.
+# These are the "true gates" the V0.5 thin reward pays a one-shot bonus for
+# (objectives, not paths). The parcel-delivery / pokedex pair is the gate
+# that forces the Pallet backtrack; BEAT_BROCK is the V1 goal.
+HARD_GATE_GOT_OAKS_PARCEL = (0xD74E, 1)   # EVENT_GOT_OAKS_PARCEL,  index 57
+HARD_GATE_GOT_POKEDEX     = (0xD74B, 5)   # EVENT_GOT_POKEDEX,      index 37 (bit 5, NOT 4)
+HARD_GATE_BEAT_BROCK      = (0xD755, 7)   # EVENT_BEAT_BROCK,       index 119
+# Not a reward gate, but a useful hidden-progress bit for the RND context
+# vector: marks the post-Oak's-Lab state (index 36, the bit adjacent to POKEDEX).
+EVENT_GOT_POKEBALLS_FROM_OAK = (0xD74B, 4)
+
 # Pokedex owned bitfield (19 bytes, 1 bit per species, 151 species).
 ADDR_POKEDEX_OWNED_START = 0xD2F7
 ADDR_POKEDEX_OWNED_END   = 0xD309  # inclusive
@@ -249,6 +263,45 @@ def event_flag_bits_set(mem: MemoryView) -> set[int]:
                 if b & (1 << bit):
                     out.add(base + bit)
     return out
+
+
+def event_flag_bit(mem: MemoryView, addr: int, bit: int) -> bool:
+    """True iff the given event-flag bit is set. `addr`/`bit` come from the
+    HARD_GATE_* constants (verified against the pokered disassembly)."""
+    return bool(mem[addr] & (1 << bit))
+
+
+def got_oaks_parcel(mem: MemoryView) -> bool:
+    return event_flag_bit(mem, *HARD_GATE_GOT_OAKS_PARCEL)
+
+
+def got_pokedex(mem: MemoryView) -> bool:
+    return event_flag_bit(mem, *HARD_GATE_GOT_POKEDEX)
+
+
+def beat_brock(mem: MemoryView) -> bool:
+    return event_flag_bit(mem, *HARD_GATE_BEAT_BROCK)
+
+
+def got_pokeballs_from_oak(mem: MemoryView) -> bool:
+    return event_flag_bit(mem, *EVENT_GOT_POKEBALLS_FROM_OAK)
+
+
+def progress_bits(mem: MemoryView) -> "list[float]":
+    """Hidden story-state bits for the RND context vector, in fixed order:
+    [oaks_parcel, pokedex, beat_brock, pokeballs_from_oak]. These are the
+    invisible-in-pixels flags that make curiosity context-aware (e.g. let it
+    tell "Pallet holding the parcel" apart from "Pallet before the parcel")."""
+    return [
+        float(got_oaks_parcel(mem)),
+        float(got_pokedex(mem)),
+        float(beat_brock(mem)),
+        float(got_pokeballs_from_oak(mem)),
+    ]
+
+
+# Width of progress_bits() — the RND progress-vector dimension.
+PROGRESS_DIM = 4
 
 
 def pokedex_owned_count(mem: MemoryView) -> int:

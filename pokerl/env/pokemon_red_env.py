@@ -16,6 +16,7 @@ import numpy as np
 from gymnasium import spaces
 from pyboy import PyBoy
 
+from pokerl.env import ram_map as rm
 from pokerl.env.rewards import Reward, RewardV0_1
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -105,7 +106,7 @@ class PokemonRedEnv(gym.Env):
         self.pyboy.tick()
         self.reward_fn.reset(self.pyboy.memory)
         self._steps = 0
-        return self._obs(), {}
+        return self._obs(), self._info()
 
     def step(
         self, action: int
@@ -131,7 +132,7 @@ class PokemonRedEnv(gym.Env):
         reward = self.reward_fn.compute(self.pyboy.memory)
         terminated = False
         truncated = self._steps >= self.max_steps
-        info: dict[str, Any] = {"step": self._steps}
+        info: dict[str, Any] = {"step": self._steps, **self._info()}
         return obs, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray:
@@ -161,3 +162,17 @@ class PokemonRedEnv(gym.Env):
         rgb = self._screen_rgb()
         gray = rgb.mean(axis=-1).astype(np.uint8)
         return gray[::2, ::2]
+
+    def _info(self) -> dict[str, Any]:
+        """Side-channel state for the RND learner (NOT part of the policy obs):
+          - 'progress': the 4 hidden story-progress bits (parcel/pokedex/brock/
+            pokeballs) that pixels can't show, so curiosity is context-aware.
+          - 'in_battle': battle flag so the PPO loop can zero intrinsic reward
+            during battles (their RNG is unlearnable noisy-TV).
+        Threading these through info (rather than a Dict obs space) keeps
+        FrameStack + AsyncVectorEnv untouched."""
+        mem = self.pyboy.memory
+        return {
+            "progress": np.asarray(rm.progress_bits(mem), dtype=np.float32),
+            "in_battle": int(rm.in_battle(mem)),
+        }

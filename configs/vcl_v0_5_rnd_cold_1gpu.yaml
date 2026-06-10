@@ -1,0 +1,35 @@
+# V0.5 RND — COLD arm — VCL single GPU (node .243).
+# Identical to vcl_v0_5_rnd_warm EXCEPT launched WITHOUT --resume: the policy
+# starts from scratch and RND shapes exploration from the ground up (no
+# inherited directional bias, but it pays the locomotion-relearn tax).
+# A/B partner: vcl_v0_5_rnd_warm. Only warm-vs-cold init differs.
+run_name: vcl_v0_5_rnd_cold
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 12
+n_steps: 256
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_5_skeleton
+
+# --- RND / curiosity ---
+rnd_enabled: true
+ext_coef: 2.0
+int_coef: 1.0
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_obs_norm_steps: 1024
+rnd_obs_clip: 5.0
+rnd_int_clip: 5.0

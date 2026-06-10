@@ -60,7 +60,9 @@ def load_net(checkpoint: Path, obs_shape: tuple[int, ...], n_actions: int) -> Ac
     net = ActorCritic(obs_shape, n_actions=n_actions)
     if checkpoint.exists():
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        net.load_state_dict(state)
+        # strict=False so the watcher loads both old 2-head checkpoints (no
+        # critic_int) and new 3-head RND checkpoints. Only the actor matters here.
+        net.load_state_dict(state, strict=False)
         print(f"Loaded checkpoint: {checkpoint}")
     else:
         print(f"NOTE: no checkpoint at {checkpoint}; running with untrained policy")
@@ -99,7 +101,7 @@ def main() -> None:
     for step in range(args.steps):
         obs_t = torch.from_numpy(obs).unsqueeze(0)
         with torch.no_grad():
-            logits, _ = net(obs_t)
+            logits = net(obs_t)[0]  # (logits, value_ext, value_int) — only logits needed
         if args.deterministic:
             action = int(logits.argmax(dim=-1).item())
         else:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 import gymnasium as gym
-from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv, VectorEnv
+from gymnasium.vector import AsyncVectorEnv, AutoresetMode, SyncVectorEnv, VectorEnv
 
 from pokerl.env.pokemon_red_env import PokemonRedEnv
 from pokerl.env.rewards import Reward, RewardV0_1
@@ -75,10 +75,16 @@ def make_vec_env(
         return thunk
 
     env_fns = [_make_one() for _ in range(n_envs)]
+    # autoreset_mode=SAME_STEP: when a sub-env truncates, it resets in the SAME
+    # step and the true terminal observation is returned via info['final_obs'].
+    # The PPO loop uses that to bootstrap the truncated value (V(final_obs)).
+    # The default NEXT_STEP mode instead delays the reset one step, injecting a
+    # garbage transition (reset obs, reward 0, ignored action) that corrupts the
+    # rollout buffer and the GAE boundary. SAME_STEP avoids that entirely.
     if async_envs:
         # context="spawn": each env subprocess gets a fresh Python interpreter.
         # Required when the parent has an initialized CUDA context (DDP ranks),
         # because fork-after-CUDA-init raises "Cannot re-initialize CUDA in
         # forked subprocess." Safe in single-process mode too.
-        return AsyncVectorEnv(env_fns, context="spawn")
-    return SyncVectorEnv(env_fns)
+        return AsyncVectorEnv(env_fns, context="spawn", autoreset_mode=AutoresetMode.SAME_STEP)
+    return SyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.SAME_STEP)

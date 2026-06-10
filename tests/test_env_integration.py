@@ -36,9 +36,10 @@ def test_env_stacked_obs_through_network():
         net = ActorCritic(obs.shape, n_actions=len(ACTIONS))
         with torch.no_grad():
             obs_t = torch.from_numpy(obs).unsqueeze(0)
-            logits, value = net(obs_t)
+            logits, value, value_int = net(obs_t)
         assert logits.shape == (1, len(ACTIONS))
         assert value.shape == (1,)
+        assert value_int.shape == (1,)
 
         # Run one env step, network should still consume the result
         obs, reward, term, trunc, _ = env.step(env.action_space.sample())

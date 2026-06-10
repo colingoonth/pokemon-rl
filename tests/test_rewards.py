@@ -714,3 +714,56 @@ def test_v044_pc_first_visit_premasked_if_started_in_center():
     r.reset(FakeMem(base_state(map_id=pc)))
     r.compute(FakeMem(base_state(map_id=pc, x=9)))
     assert "PC_FIRST_VISIT" not in r.last_components
+
+
+# --- V0.5 hard-gate readers + thin skeleton ---
+
+def _mem_with_byte(addr: int, value: int) -> "FakeMem":
+    s = base_state()
+    s[addr] = value
+    return FakeMem(s)
+
+
+def test_hard_gate_readers_bit_positions():
+    # parcel = 0xD74E bit1, pokedex = 0xD74B bit5, brock = 0xD755 bit7
+    assert rm.got_oaks_parcel(_mem_with_byte(0xD74E, 1 << 1)) is True
+    assert rm.got_oaks_parcel(FakeMem(base_state())) is False
+    assert rm.got_pokedex(_mem_with_byte(0xD74B, 1 << 5)) is True
+    # bit 4 (GOT_POKEBALLS_FROM_OAK) must NOT read as pokedex
+    assert rm.got_pokedex(_mem_with_byte(0xD74B, 1 << 4)) is False
+    assert rm.beat_brock(_mem_with_byte(0xD755, 1 << 7)) is True
+    assert rm.beat_brock(FakeMem(base_state())) is False
+
+
+def test_v05_skeleton_disables_exploration_shaping():
+    from pokerl.env.rewards import RewardV0_5_skeleton
+    assert RewardV0_5_skeleton.EXPLORE_COEF == 0.0
+    assert RewardV0_5_skeleton.STUCK_PENALTY_PER_STEP == 0.0
+
+
+def test_v05_gate_fires_once_then_masks():
+    from pokerl.env.rewards import RewardV0_5_skeleton
+    r = RewardV0_5_skeleton()
+    r.reset(FakeMem(base_state()))           # no gates satisfied at start
+    mem = _mem_with_byte(0xD74E, 1 << 1)     # parcel obtained
+    r.compute(mem)
+    assert r.last_components.get("GATE_GOT_OAKS_PARCEL") == 10.0
+    # second step with the flag still set -> no double-pay
+    r.compute(mem)
+    assert "GATE_GOT_OAKS_PARCEL" not in r.last_components
+
+
+def test_v05_gate_premasked_if_satisfied_at_start():
+    from pokerl.env.rewards import RewardV0_5_skeleton
+    r = RewardV0_5_skeleton()
+    r.reset(_mem_with_byte(0xD74E, 1 << 1))  # already have the parcel at reset
+    r.compute(_mem_with_byte(0xD74E, 1 << 1))
+    assert "GATE_GOT_OAKS_PARCEL" not in r.last_components
+
+
+def test_v05_beat_brock_gate_pays_fifty():
+    from pokerl.env.rewards import RewardV0_5_skeleton
+    r = RewardV0_5_skeleton()
+    r.reset(FakeMem(base_state()))
+    r.compute(_mem_with_byte(0xD755, 1 << 7))
+    assert r.last_components.get("GATE_BEAT_BROCK") == 50.0
