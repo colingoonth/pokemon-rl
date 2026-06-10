@@ -1406,3 +1406,266 @@ A few changes that went into the project today, briefly justified:
   doing this" section of the writeup: production RL is mostly
   infra debugging, and one env var stood between "barely usable"
   and "throughput parity with the institutional cluster."
+
+
+## 2026-06-09 — Day 7: reward attribution + two interacting bugs
+
+### What I started chasing
+
+Iter 1600 of the resumed V0.4.2 run was doing the same Tail Whip
+lock-in V0.4 had. That should not have happened. V0.4.2 was the
+specific designed fix for it: BATTLE_STALL -0.01/step after 30
+no-HP-change steps, plus recalibrated DAMAGE_QUAD and LOSE.
+
+Watching the iter 1600 checkpoint: agent voluntarily enters wild
+battles, picks Tail Whip, gets KO'd, respawns at PC with full HP,
+walks back into grass, repeats. Mean return on the training run
+was +135. The agent had clearly learned this strategy was
+profitable. The question was why.
+
+### The metrics check
+
+Pulled the full metrics.csv. Two things stood out:
+
+1. Episodes terminate by truncation (max_steps=4096), not by
+   blackout. 1380 episodes / 5.68M steps = 4118 steps/episode,
+   right at the cap. So the blackout-as-episode-reset theory was
+   wrong: episodes don't actually end on blackout.
+2. Mean return +135 over 4096 steps is 0.033 per step. That's
+   not "exploration is paying out massively" or "combat is paying
+   out massively" — that's some specific source quietly bleeding
+   reward in a way I couldn't see from one scalar.
+
+Took it as the lesson: reward attribution should have been built
+in from V0.1. I was running reward variants for two weeks before
+seeing where the reward was actually coming from.
+
+### Building reward attribution
+
+Added a `last_components: dict[str, float]` on the V0.4.0+ Reward
+classes plus a `_track(name, value)` helper. Each `reward += X`
+in V0_3_4/V0_4_1/V0_4_2 was rewritten as
+`reward += self._track("NAME", X)`. Updated watch.py to aggregate
+across the rollout and print a sorted summary at the end.
+
+Pre-V0.3.4 inherited rewards went into a single "INHERITED"
+bucket initially. The plan was to break it down further if it
+turned out to matter. It mattered.
+
+### First attribution run (iter 1600, 5000 steps, deterministic)
+
+```
+INHERITED       +199.500  (   45 fires, +123.9% of total)
+DAMAGE_QUAD      -18.857  (  112 fires,  -11.7% of total)
+STUCK            -16.580  ( 3316 fires,  -10.3% of total)
+BATTLE_STALL      -9.480  (  948 fires,   -5.9% of total)
+BEAT_MON          +5.225  (    3 fires,   +3.2% of total)
+LEVEL             +1.000  (    1 fires,   +0.6% of total)
+EXPLORE           +0.184  (   59 fires,   +0.1% of total)
+sum             +160.992
+```
+
+EXPLORE was +0.18. The whole "exploration is dominating" theory I
+had was completely wrong. Real source was INHERITED at +199.5,
+which contains HEAL_QUAD, LOSE_BATTLE, FAINT_PENALTY, FLEE_PENALTY,
+and TRAINER_WIN_BONUS. The 45 fires for +199.5 averages +4.4 per
+fire. That's the signature of a quadratic heal reward firing on
+partial-to-full heals.
+
+Also good: BATTLE_STALL was firing 948 times for -9.48. So my
+earlier "Theory 1" (BATTLE_STALL never fires because enemy
+attacks bypass the no-HP-change check) was wrong. It does fire.
+Just not enough to outweigh whatever was in INHERITED.
+
+### Breaking INHERITED apart
+
+Instrumented V0_2_2 (LOSE_BATTLE, TRAINER_WIN_BONUS, FLEE_PENALTY,
+FAINT_PENALTY) and V0_3_3 (HEAL_QUAD) with `_attr_v022` — a
+defensive helper that only writes if `last_components` is on the
+instance. This way I didn't have to add the tracking mixin to
+classes that might still be used standalone in tests.
+
+Updated V0_3_4 to compute UNATTRIBUTED as super()'s scalar minus
+what was tracked, instead of bundling all of super into INHERITED.
+
+Re-ran. Now the data was unambiguous:
+
+```
+HEAL_QUAD        +315.001  (   22 fires, +206.1% of total)
+FAINT_PENALTY    -105.000  (   21 fires,  -68.7% of total)
+STUCK             -18.450  ( 3690 fires,  -12.1% of total)
+DAMAGE_QUAD       -17.867  (  110 fires,  -11.7% of total)
+LOSE_BATTLE       -10.000  (    1 fires,   -6.5% of total)
+FLEE_PENALTY      -10.000  (   20 fires,   -6.5% of total)
+BATTLE_STALL      -9.200  (  920 fires,   -6.0% of total)
+BEAT_MON           +7.180  (    5 fires,   +4.7% of total)
+sum              +152.848
+```
+
+Two things jumped out:
+
+1. **HEAL_QUAD +315 over 22 fires, averaging +14.3 per heal.**
+   That's almost certainly the (delta_hp_frac)^2 * 15 formula
+   maxing out — delta ≈ 1.0 means partial-to-full heal worth ~15
+   each time.
+2. **21 FAINT_PENALTY fires but only 1 LOSE_BATTLE.** The agent
+   only has one Pokemon. Every faint should be a full-party loss.
+
+The mismatch was the smoking gun. Twenty of the agent's "deaths"
+weren't being recognized as battle losses.
+
+### Bug #1: single-step blackout heal loophole
+
+The `_blackout_pending` guard in V0_3_3 relies on V0_2_3 setting
+the flag when in_battle just ended AND party is all-dead at
+end-of-step. The flag suppresses HEAL_QUAD on the next compute.
+
+But if the entire faint -> blackout -> PC respawn-at-full-HP
+sequence happens within a single env step (FRAMES_PER_STEP=24 is
+about 0.4s of game time, enough for the fade-and-respawn animation),
+then by the end of the step the party is already healed. The
+`all_dead_now` check is False. The flag never gets set. HEAL_QUAD
+sees delta = 1.0, fires for +15.
+
+First fix attempt used `on_pc_map` as a signature:
+"battle just ended AND now on a PC map AND HP at full." Wrong —
+the agent in blue_fight.state hasn't visited any Pokemon Center
+yet, so blackout sends it to Pallet Town home, which is not in
+POKECENTER_MAP_IDS. Re-ran: no change.
+
+Second fix attempt dropped the PC-map requirement: "battle just
+ended this step AND HP went from low to full (delta > 0.5) in
+this same step." That's not a pattern that happens in normal play
+— legit PC heals don't have the battle transition, in-battle
+items don't end the battle. Only blackout-respawn-anywhere fits
+the signature. Re-ran:
+
+```
+HEAL_QUAD         +15.001  (    1 fires)  # was +315 / 22 fires
+LOSE_BATTLE       -10.000  (    1 fires)  # still 1
+FAINT_PENALTY    -120.000  (   24 fires)
+total            -179.187                  # was +152
+```
+
+HEAL_QUAD dropped from 22 fires to 1. Confirmed the exploit.
+
+But LOSE_BATTLE was still only 1. The FAINTs were still showing
+up but the lost battles weren't being penalized as losses.
+
+### Bug #2: blackouts misclassified as flees
+
+V0_2_2's battle-end logic walks an if/elif/elif/else chain:
+not party_alive → LOSE_BATTLE; enemy killed + trainer → TRAINER_WIN_BONUS;
+enemy killed or caught → pass; else → FLEE_PENALTY.
+
+After bug #1's fix, the blackout sequence still completes with
+party_alive=True at end of step (healed back to full). It falls
+through the chain to the `else` branch — FLEE_PENALTY (-0.5).
+Twenty of the agent's 21 "losses" were being charged 50¢ instead
+of the LOSE_BATTLE -10.
+
+Third fix attempt used _last_party_hp + party-at-full-HP as a
+single-step blackout signature inside the else-branch. Re-ran:
+no change. The reason was scenario F (took some tracing to spot):
+
+```
+Step A: HP 15 -> 0. FAINT fires. in_battle=1 throughout.
+Step B: in_battle=1, animation playing, no HP change
+Step C: in_battle=1, animation continuing
+Step D: in_battle=0, HP=full (blackout heal completed).
+```
+
+By step D, `_last_party_hp` is `[0]` (from step A's update at
+end of compute). `was_alive_going_in` from `[0]` is False. My
+fix's precondition failed.
+
+Fourth fix attempt: sticky `_party_fainted_this_battle` flag.
+Set on FAINT detection, cleared at battle_started. Survives the
+gap between the faint step and the in_battle=0 step. In the
+battle_ended else-branch: if the flag is True, it's a blackout
+loss, charge LOSE_BATTLE. If not, it's a real flee, charge
+FLEE_PENALTY.
+
+This matches the existing battle-flag pattern V0_2_2 already uses
+(`_enemy_killed_this_battle`, `_pokemon_caught_this_battle`,
+`_battle_was_trainer`) — same scope, same lifecycle.
+
+### The clean attribution
+
+```
+LOSE_BATTLE      -240.000  (   24 fires)
+FAINT_PENALTY    -120.000  (   24 fires)
+STUCK             -21.640  ( 4328 fires)
+DAMAGE_QUAD       -21.550  (  110 fires)
+HEAL_QUAD         +15.000  (    1 fires)
+BATTLE_STALL      -9.640  (  964 fires)
+BEAT_MON           +1.955  (    1 fires)
+EXPLORE            +0.099  (   43 fires)
+sum             -395.775
+```
+
+FLEE_PENALTY went to zero — the 20 misclassified flees from
+earlier are now correctly LOSE_BATTLE. HEAL_QUAD is one legit
+heal. Total return is -395.78.
+
+The iter 1600 policy was trained against rewards that gave it a
+phantom +545 per 5000 steps (the +315 missing HEAL_QUAD suppression
+plus the ~+230 in misclassified LOSE_BATTLE-as-FLEE). The agent's
+"suicide for heal rewards" strategy made perfect sense in the
+buggy reward space. In the corrected reward space, the strategy
+collapses to -395.78. The policy weights are useless.
+
+### Decisions
+
+1. **Train fresh from random init against the fixed reward,
+   keeping V0.4.2_center calibrations.** No --resume. The Tail
+   Whip pathology was caused by reward bugs, not reward design.
+   The right test is whether V0.4.2's calibrations work once the
+   reward landscape is what we thought it was.
+2. **Hold off on the BATTLE_STALL enemy-HP-decrease tweak.** It
+   was the diagnostic for "Theory 1" that turned out to be wrong.
+   BATTLE_STALL was firing fine; the issue was elsewhere. Don't
+   touch a working component while validating a fix in two other
+   components.
+
+### Lessons that should not get lost
+
+1. **Reward attribution should have been built in from V0.1.** Two
+   weeks of reward iteration ran without seeing where reward was
+   actually coming from. The attribution took ~30 minutes to build
+   and immediately surfaced two interacting bugs that were
+   invisible to the scalar metric. Every future RL project gets
+   per-component attribution on day one.
+2. **Same-step state transitions are the dangerous class of bug
+   in step-granularity rewards.** Three guards in this codebase
+   (HEAL_QUAD blackout suppression, LOSE_BATTLE party-dead check,
+   FAINT_PENALTY transition detection) all relied on end-of-step
+   snapshots. Two of them broke when faint + battle-end + respawn
+   collapsed into a single env step. The agent found and
+   exploited both within a few hundred iterations.
+3. **The agent will exploit any phantom positive reward.** I'd
+   intuited "exploration is dominating" and was about to tune
+   down EXPLORE_COEF. The attribution showed EXPLORE was +0.18.
+   The actual exploit was an order of magnitude larger and lived
+   in a different reward component. Don't tune what you can't see.
+4. **State + sticky flag works where end-of-step snapshots fail.**
+   The pattern V0_2_2 already established for
+   `_enemy_killed_this_battle` etc. was the right fix for
+   LOSE_BATTLE detection. Should have used that pattern from the
+   start instead of relying on end-of-step party_hp.
+
+### Open thread
+
+- New VCL reservation arriving in a few minutes. Fresh training
+  run from random init on V0.4.2_center with the two fixes
+  applied. Watch iter 1000-2000 for the actual V0.4.2 verdict.
+- The diagnostic checkpoint to watch will be a clean signal this
+  time. Attribution will show whether the agent is actually
+  fighting (BEAT_MON, LEVEL, EXPLORE rising; LOSE_BATTLE falling)
+  or stuck in a different degenerate equilibrium.
+- If V0.4.2 calibrations work with the fixed reward, that's the
+  end of the V0.4 line for now — graduate to V0.5 territory
+  (curriculum past blue_fight, exploration beyond Viridian).
+- If V0.4.2 still fails, the BATTLE_STALL enemy-HP-decrease tweak
+  was the next thing on the queue. But we'd have clean attribution
+  data to design from, not guesses.
