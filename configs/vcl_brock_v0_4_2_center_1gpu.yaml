@@ -1,6 +1,7 @@
 # V0.4.2 center arm — VCL single GPU (RTX 2080 Ti, 16 cores)
 #   BATTLE_STALL -0.01/step after 30 + DAMAGE_QUAD 15->5 + LOSE -20->-10
-# Diagnostic probe (entropy_coef 0.005). Watch checkpoint at iter 3000-5000.
+# entropy_coef 0.01 — full-training setting (probe at 0.005 passed
+# 2026-06-09: V0.4.2 design works with corrected reward bugs).
 # n_envs=12: VCL has 16 cores all available to PyBoy (vs ~8/GPU on ELSA).
 # minibatch_size=192: keeps 16 minibatches/epoch (12*256/192).
 run_name: vcl_brock_v0_4_2_center_1gpu
@@ -15,7 +16,7 @@ gamma: 0.999
 gae_lambda: 0.95
 clip_coef: 0.1
 value_coef: 0.5
-entropy_coef: 0.005
+entropy_coef: 0.01
 max_grad_norm: 0.5
 anneal_lr: true
 seed: 0
