@@ -35,6 +35,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=1000)
     p.add_argument("--record", action="store_true",
                    help="Run headless and dump a gif instead of opening a window")
+    p.add_argument("--silent", action="store_true",
+                   help="Run headless with no window and no gif — just print "
+                        "the metrics + reward attribution at the end.")
     p.add_argument("--deterministic", action="store_true",
                    help="Use argmax actions instead of sampling")
     p.add_argument("--speed", type=float, default=0.0,
@@ -63,9 +66,10 @@ def load_net(checkpoint: Path, obs_shape: tuple[int, ...], n_actions: int) -> Ac
 def main() -> None:
     args = parse_args()
 
-    env = make_env(headless=args.record, max_steps=args.steps + 1,
+    headless = args.record or args.silent
+    env = make_env(headless=headless, max_steps=args.steps + 1,
                    frame_stack=4, state_path=args.state_path)
-    if not args.record:
+    if not headless:
         # Throttle the SDL2 window to the requested multiple of real time.
         env.unwrapped.pyboy.set_emulation_speed(args.speed)
     obs, _ = env.reset()
