@@ -1344,6 +1344,28 @@ class RewardV0_4_4_curated(RewardV0_4_3_curated):
     PC_FIRST_VISIT = 10.0
 
 
+class RewardV0_4_5_dense(RewardV0_4_4_dense):
+    """V0.4.5 dense: V0.4.4 + PC_FIRST_VISIT bumped 10 -> 50.
+
+    Magnitude test of the heal-entry incentive. At +10 (V0.4.4) the agent
+    reached a Pokecenter ~once per 30k steps and stood in Viridian ignoring
+    the Center — EXPLORE/NEW_MAP pay it to keep walking past. +50 makes
+    entering clearly worth the detour. One-shot per Center per episode (no
+    farm) and bounded (~1-2 reachable Centers early), so it stays on the
+    critical path rather than dominating. Intended for WARM-START from a
+    V0.4.4 iter-~2800 checkpoint (already explores + reaches Viridian), so
+    we test door-entry behavior in minutes, not hours. entropy_coef 0.01.
+    """
+    PC_FIRST_VISIT = 50.0
+
+
+class RewardV0_4_5_curated(RewardV0_4_4_curated):
+    """V0.4.5 curated: V0.4.4 + PC_FIRST_VISIT bumped 10 -> 50. A/B partner
+    to RewardV0_4_5_dense; warm-started from V0.4.4 curated iter-~2800.
+    """
+    PC_FIRST_VISIT = 50.0
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1404,6 +1426,8 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_4_3_curated": RewardV0_4_3_curated,
     "RewardV0_4_4_dense": RewardV0_4_4_dense,
     "RewardV0_4_4_curated": RewardV0_4_4_curated,
+    "RewardV0_4_5_dense": RewardV0_4_5_dense,
+    "RewardV0_4_5_curated": RewardV0_4_5_curated,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,

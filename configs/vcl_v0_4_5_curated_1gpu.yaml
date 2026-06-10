@@ -1,0 +1,22 @@
+# V0.4.5 curated arm — VCL single GPU. V0.4.4 + PC_FIRST_VISIT 10 -> 50.
+# WARM-STARTED from the V0.4.4 curated iter-~2800 checkpoint (--resume).
+# A/B partner: dense arm, ONLY reward_class differs. entropy_coef 0.01.
+run_name: vcl_v0_4_5_curated
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 12
+n_steps: 256
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_4_5_curated
