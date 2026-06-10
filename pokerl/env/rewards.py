@@ -320,6 +320,14 @@ class RewardV0_2_2(RewardV0_2_1):
         self._visited_maps = {rm.map_id(mem)}
         self._caught_species = set()
 
+    def _attr_v022(self, name: str, value: float) -> None:
+        """Defensive: only attributes if a V0.4.0+ instance set up
+        last_components. Calling on a plain V0_2_2 instance is a no-op.
+        """
+        components = getattr(self, "last_components", None)
+        if components is not None and value != 0.0:
+            components[name] = components.get(name, 0.0) + value
+
     def compute(self, mem: MemoryView) -> float:
         reward = self.STEP_PENALTY
 
@@ -402,17 +410,21 @@ class RewardV0_2_2(RewardV0_2_1):
             party_alive = any(hp > 0 for hp in party_hp)
             if not party_alive:
                 reward += self.LOSE_BATTLE
+                self._attr_v022("LOSE_BATTLE", self.LOSE_BATTLE)
             elif self._enemy_killed_this_battle and self._battle_was_trainer:
                 reward += self.TRAINER_WIN_BONUS
+                self._attr_v022("TRAINER_WIN_BONUS", self.TRAINER_WIN_BONUS)
             elif self._enemy_killed_this_battle or self._pokemon_caught_this_battle:
                 pass  # already paid via BEAT_MON_REWARD or CATCH_REWARD
             else:
                 reward += self.FLEE_PENALTY
+                self._attr_v022("FLEE_PENALTY", self.FLEE_PENALTY)
 
         # ----- Per-faint penalty -----
         for i in range(min(len(party_hp), len(self._last_party_hp))):
             if self._last_party_hp[i] > 0 and party_hp[i] == 0:
                 reward += self.FAINT_PENALTY
+                self._attr_v022("FAINT_PENALTY", self.FAINT_PENALTY)
         self._last_party_hp = party_hp
 
         # ----- Progression -----
@@ -778,7 +790,9 @@ class RewardV0_3_3(RewardV0_3_1):
         hp_frac = (cur / mx) if mx > 0 else 0.0
         delta = max(0.0, hp_frac - self._last_hp_frac)
         if delta > 0 and self.HEAL_QUAD_COEF > 0 and not was_blackout_pending:
-            reward += (delta ** 2) * self.HEAL_QUAD_COEF
+            heal_val = (delta ** 2) * self.HEAL_QUAD_COEF
+            reward += heal_val
+            self._attr_v022("HEAL_QUAD", heal_val)
         self._last_hp_frac = hp_frac
         return reward
 
@@ -895,8 +909,15 @@ class RewardV0_3_4(RewardV0_3_3):
         prev_in_battle = self._last_in_battle
 
         reward = super().compute(mem)
-        if reward != 0.0:
-            self.last_components["INHERITED"] = reward
+        # super() has already written its tracked components (HEAL_QUAD,
+        # LOSE_BATTLE, FAINT_PENALTY, TRAINER_WIN_BONUS, FLEE_PENALTY) via
+        # _attr_v022. Anything in super's scalar that wasn't tracked goes
+        # into UNATTRIBUTED (covers older V0.1/V0.2 rewards that aren't
+        # instrumented because they're zeroed in the V0.4 line).
+        tracked_so_far = sum(self.last_components.values())
+        unattrib = reward - tracked_so_far
+        if abs(unattrib) > 1e-9:
+            self.last_components["UNATTRIBUTED"] = unattrib
 
         # ---- LEVEL: log_6(new_level) per unit gained ----
         level_total_now = sum(rm.party_levels(mem))
