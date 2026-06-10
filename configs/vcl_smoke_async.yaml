@@ -1,0 +1,20 @@
+# Async smoke test — 2 envs, async_envs true. Diagnose VCL async hang.
+run_name: vcl_smoke_async
+state_path: states/blue_fight.state
+total_timesteps: 50_000
+n_envs: 2
+n_steps: 256
+n_epochs: 4
+minibatch_size: 64
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 1
+async_envs: true
+reward_class: RewardV0_4_2_center

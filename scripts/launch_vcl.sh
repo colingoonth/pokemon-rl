@@ -17,7 +17,7 @@ mkdir -p "runs/$RUN_NAME"
 
 tmux new-session -d -s train \
     "cd $(pwd) && source $HOME/.local/bin/env && \
-     uv run python -m pokerl.scripts.train --config $CONFIG \
+     PYTHONUNBUFFERED=1 SDL_VIDEODRIVER=dummy uv run python -m pokerl.scripts.train --config $CONFIG \
      2>&1 | tee runs/$RUN_NAME/train.log"
 
 echo "Launched run '$RUN_NAME' in tmux session 'train'."
