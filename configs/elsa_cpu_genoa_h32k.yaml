@@ -1,0 +1,39 @@
+# V0.5 RND — Genoa CPU run (ELSA node001-010, 192-core AMD EPYC Genoa).
+# PyBoy is CPU-bound + single-threaded per env, so throughput scales with
+# parallel envs, not GPU. This run trades the GPU for ~12x the env count:
+# n_envs 12 -> 144. Launched with `--device cpu` (these nodes have no GPU).
+# CRITICAL: the sbatch MUST pin OMP/MKL/OPENBLAS_NUM_THREADS=1 or the 144 env
+# subprocesses each spawn 192 BLAS threads and thrash the node.
+# Keeps the long-horizon (max_steps=32768) cold experiment + all 2026-06-10
+# correctness fixes. minibatch 192 divides batch 256*144=36864 (=192 mbs).
+run_name: elsa_genoa_cold_h32k
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 256
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 5
+async_envs: true
+reward_class: RewardV0_5_skeleton
+
+# --- RND / curiosity ---
+rnd_enabled: true
+ext_coef: 2.0
+int_coef: 1.0
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_obs_norm_steps: 1024
+rnd_obs_clip: 5.0
+rnd_int_clip: 5.0

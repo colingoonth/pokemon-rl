@@ -40,3 +40,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Local sync loops that embed plaintext cluster credentials — never commit
+scripts/sync_latest_loop*.sh
