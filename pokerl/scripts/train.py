@@ -111,7 +111,7 @@ def main() -> None:
             n_envs=n_envs_per_rank,
             state_path=state_path,
             headless=True,
-            max_steps=4096,
+            max_steps=cfg.max_steps,
             frame_stack=4,
             async_envs=cfg.async_envs,
             reward_cls=reward_cls,

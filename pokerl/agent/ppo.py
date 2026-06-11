@@ -79,7 +79,8 @@ def apply_truncation_bootstrap(
 class PPOConfig:
     total_timesteps: int = 10_000
     n_envs: int = 1               # vectorized env count
-    n_steps: int = 128            # rollout length per env
+    n_steps: int = 128            # rollout length per env (PPO buffer, NOT episode len)
+    max_steps: int = 4096         # episode truncation length (exploration horizon)
     n_epochs: int = 4
     minibatch_size: int = 64
     learning_rate: float = 2.5e-4

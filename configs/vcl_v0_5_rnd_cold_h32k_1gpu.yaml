@@ -1,0 +1,40 @@
+# V0.5 RND — COLD arm, LONG-HORIZON variant — VCL single GPU (node .243).
+# Identical to vcl_v0_5_rnd_cold EXCEPT max_steps 4096 -> 32768: gives the
+# agent ~8x longer episodes so curiosity spends contiguous time in novel
+# territory instead of being teleported back to blue_fight.state every 4096
+# steps. Fresh init (no --resume) so the long-horizon variable is isolated
+# from a clean policy, not mixed with a policy trained on 4096-step episodes.
+# Also the first run to include the 2026-06-10 correctness pass (resumable
+# checkpoints, per-stream coef-normalized advantage, split grad-clip, raw
+# novelty / advantage-std logging).
+run_name: vcl_v0_5_rnd_cold_h32k
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 12
+n_steps: 256
+max_steps: 32768
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 10
+async_envs: true
+reward_class: RewardV0_5_skeleton
+
+# --- RND / curiosity ---
+rnd_enabled: true
+ext_coef: 2.0
+int_coef: 1.0
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_obs_norm_steps: 1024
+rnd_obs_clip: 5.0
+rnd_int_clip: 5.0
