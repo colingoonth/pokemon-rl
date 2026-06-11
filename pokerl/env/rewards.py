@@ -1108,8 +1108,18 @@ class RewardV0_4_2_center(RewardV0_4_1):
 
     3. LOSE_BATTLE: -20 -> -10. V0.4's raise to -20 predated
        DAMAGE_QUAD; the latter now handles ongoing damage cost during
-       losing fights. -10 keeps blackout meaningfully costly without
-       double-counting the same fight's losses.
+       losing fights. -10 keeps blackout meaningfully costly across
+       repeated fights without re-charging the same lost fight's prior
+       turns of damage.
+
+       NOTE (whiteout cost is intentionally FAINT-stacked): on a
+       whiteout the killing-blow mon also fires FAINT_PENALTY, so a
+       single-mon whiteout costs LOSE_BATTLE + FAINT_PENALTY (-15), and
+       a multi-mon wipe adds one FAINT_PENALTY per downed mon on top of
+       the single -10. This stacking is deliberate (a full wipe should
+       hurt more than losing one mon), NOT the double-count this bullet
+       warns against — that warning is about not re-billing the same
+       fight's damage turns, which DAMAGE_QUAD already covers.
 
     Predicted Blue rival EV at 30% win rate: ~-8 (was ~-17 in V0.4.1).
     Breakeven ~57% — within bootstrap-recoverable range.

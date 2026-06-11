@@ -250,18 +250,38 @@ def train(
         device = torch.device(cfg.device)
 
     raw_net = ActorCritic(obs_shape, n_actions=n_actions).to(device)
+    resume_ckpt: dict | None = None  # set iff a FULL-resume dict was loaded
+    resume_global_step = 0
+    resume_iteration = 0
     if resume_path is not None:
-        state = torch.load(resume_path, map_location=device, weights_only=True)
+        # weights_only=False: a full-resume checkpoint carries optimizer state,
+        # numpy normalization stats, and python scalars, not just tensors. These
+        # are our own trusted checkpoints.
+        loaded = torch.load(resume_path, map_location=device, weights_only=False)
+        # Two resume modes, distinguished by the checkpoint shape:
+        #   FULL resume      — a V0.5 dict {"net", "optimizer", "rnd", ...}:
+        #                      continue the run (weights + optimizer + curiosity
+        #                      + step/anneal position). For chaining reservations.
+        #   WEIGHTS-ONLY     — a bare state_dict (e.g. a pre-RND 2-head
+        #   warm-start         checkpoint): transfer policy weights only;
+        #                      curiosity / optimizer / step counter start fresh.
+        #                      This is the clean warm-vs-cold A/B contract.
+        if isinstance(loaded, dict) and "net" in loaded:
+            resume_ckpt = loaded
+            net_state = loaded["net"]
+        else:
+            net_state = loaded
         # strict=False so a warm-start from a checkpoint that predates a head
         # (e.g. a 2-head pre-RND checkpoint has no critic_int) loads cleanly —
         # the missing head inits fresh. An UNEXPECTED key, by contrast, means
         # the checkpoint doesn't match this architecture: a real error.
-        missing, unexpected = raw_net.load_state_dict(state, strict=False)
+        missing, unexpected = raw_net.load_state_dict(net_state, strict=False)
         if unexpected:
             raise RuntimeError(f"resume checkpoint has unexpected keys: {unexpected}")
         if dctx.is_main:
+            mode = "full-resume" if resume_ckpt is not None else "weights-only warm-start"
             extra = f"  (fresh-init: {sorted(missing)})" if missing else ""
-            print(f"Resumed weights from {resume_path}{extra}")
+            print(f"Resumed weights from {resume_path} [{mode}]{extra}")
 
     # RND is single-process only for now: the predictor would need its own DDP
     # wrap + grad all-reduce, which the 1-GPU VCL runs don't need. Guard loudly.
@@ -302,6 +322,50 @@ def train(
         params += list(rnd_model.predictor.parameters())
     optimizer = optim.Adam(params, lr=cfg.learning_rate, eps=1e-5)
 
+    # --- Full-resume restore (now that optimizer + RND objects exist) ---
+    # Without restoring these a "resumed" run silently re-randomizes the RND
+    # target (a brand-new novelty function), re-zeros obs/return normalization,
+    # discards optimizer momentum, and re-anneals LR from peak — i.e. it does
+    # NOT continue the run. Restore them so cross-reservation chaining is real.
+    rnd_state_restored = False
+    if resume_ckpt is not None:
+        if "optimizer" in resume_ckpt:
+            optimizer.load_state_dict(resume_ckpt["optimizer"])
+        resume_global_step = int(resume_ckpt.get("global_step", 0))
+        resume_iteration = int(resume_ckpt.get("iteration", 0))
+        if cfg.rnd_enabled and "rnd" in resume_ckpt:
+            rnd_model.load_state_dict(resume_ckpt["rnd"])
+            o = resume_ckpt["obs_rms"]
+            obs_rms.mean, obs_rms.var, obs_rms.count = o["mean"], o["var"], o["count"]
+            r = resume_ckpt["reward_rms"]
+            reward_rms.mean, reward_rms.var, reward_rms.count = r["mean"], r["var"], r["count"]
+            saved_rff = np.asarray(resume_ckpt["rff"], dtype=np.float64)
+            # rff is per-env; a length mismatch would silently broadcast (e.g.
+            # saved n_envs=1 into n_envs=N) and corrupt the discounted-return
+            # state. Refuse rather than continue with garbage normalization.
+            if saved_rff.shape != rff.rewems.shape:
+                raise RuntimeError(
+                    f"resume rff shape {saved_rff.shape} != current "
+                    f"{rff.rewems.shape}: n_envs changed between save and resume; "
+                    f"chained runs must keep n_envs constant."
+                )
+            rff.rewems = saved_rff
+            rnd_state_restored = True
+        elif cfg.rnd_enabled and dctx.is_main:
+            print("  NOTE: full-resume checkpoint carries no RND state; curiosity starts fresh.")
+        elif (not cfg.rnd_enabled) and "rnd" in resume_ckpt and dctx.is_main:
+            print("  WARNING: checkpoint carries RND state but rnd_enabled=False; "
+                  "curiosity is discarded for this run.")
+        saved_total = resume_ckpt.get("total_timesteps")
+        if (saved_total is not None and saved_total != cfg.total_timesteps
+                and dctx.is_main):
+            print(f"  WARNING: resume total_timesteps {cfg.total_timesteps} != "
+                  f"saved {saved_total}; LR-anneal slope will differ from the "
+                  f"original run (intended only when deliberately extending).")
+        if dctx.is_main:
+            print(f"  full-resume: global_step={resume_global_step}, "
+                  f"resuming after iteration {resume_iteration}")
+
     # Disjoint per-rank env seeding. Spaced by 10k so reset seeds don't
     # collide across ranks for any realistic n_envs_local.
     obs_np, _ = envs.reset(seed=cfg.seed + dctx.rank * 10_000)
@@ -309,7 +373,7 @@ def train(
     # RND obs-norm warmup: seed obs_rms from random rollouts so the first
     # intrinsic rewards aren't computed against uninitialized statistics, then
     # re-reset so training episodes start cleanly at the curriculum state.
-    if cfg.rnd_enabled and cfg.rnd_obs_norm_steps > 0:
+    if cfg.rnd_enabled and cfg.rnd_obs_norm_steps > 0 and not rnd_state_restored:
         for _ in range(cfg.rnd_obs_norm_steps):
             a = np.array([envs.single_action_space.sample() for _ in range(n_envs_local)])
             o, _, _, _, _ = envs.step(a)
@@ -335,7 +399,18 @@ def train(
     )
 
     n_iterations = max(1, cfg.total_timesteps // batch_size_global)
-    global_step = 0  # counts GLOBAL samples (sum across all ranks)
+    # global_step / start iteration continue from a full-resume (else 0/fresh).
+    global_step = resume_global_step  # counts GLOBAL samples (sum across all ranks)
+    # A resume whose total_timesteps yields n_iterations <= the saved iteration
+    # would run the training loop ZERO times and then save a "final" checkpoint —
+    # silently burning a reservation while looking successful. Fail loudly.
+    if resume_iteration >= n_iterations:
+        raise RuntimeError(
+            f"resume_iteration={resume_iteration} >= n_iterations={n_iterations}: "
+            f"this run would do no training. Increase total_timesteps "
+            f"(current {cfg.total_timesteps}) to extend the run past the "
+            f"checkpoint, or resume from an earlier checkpoint."
+        )
 
     ep_returns_running = np.zeros(n_envs_local, dtype=np.float64)
     ep_lengths_running = np.zeros(n_envs_local, dtype=np.int64)
@@ -348,7 +423,34 @@ def train(
         ckpt_dir = Path(cfg.log_csv).parent / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    for iteration in range(1, n_iterations + 1):
+    def _build_ckpt(iteration: int) -> dict:
+        """Full checkpoint so a resume CONTINUES the run (weights + optimizer +
+        curiosity + step/anneal) rather than re-randomizing. watch.py/rollout.py
+        and the weights-only warm-start path read the "net" sub-key; bare legacy
+        state_dicts (no "net") still load too."""
+        net_sd = net.module.state_dict() if dctx.is_distributed else net.state_dict()
+        ckpt = {
+            "net": net_sd,
+            "optimizer": optimizer.state_dict(),
+            "global_step": global_step,
+            "iteration": iteration,
+            "total_timesteps": cfg.total_timesteps,
+        }
+        if cfg.rnd_enabled:
+            # The frozen target net IS the novelty function — persist it, the
+            # predictor's progress, and both running normalizers, or a resume
+            # silently restarts exploration from a different random target.
+            ckpt["rnd"] = rnd_model.state_dict()
+            ckpt["obs_rms"] = {
+                "mean": obs_rms.mean, "var": obs_rms.var, "count": obs_rms.count,
+            }
+            ckpt["reward_rms"] = {
+                "mean": reward_rms.mean, "var": reward_rms.var, "count": reward_rms.count,
+            }
+            ckpt["rff"] = rff.rewems
+        return ckpt
+
+    for iteration in range(resume_iteration + 1, n_iterations + 1):
         iter_t0 = time.perf_counter()
         if cfg.anneal_lr:
             frac = 1.0 - (iteration - 1) / n_iterations
@@ -455,11 +557,16 @@ def train(
         )
 
         mean_int_reward = 0.0
+        mean_raw_novelty = 0.0
         if cfg.rnd_enabled:
             # Normalize intrinsic rewards by the running std of the discounted
             # intrinsic RETURNS (keeps novelty scale stable as the predictor
             # learns), clip, then non-episodic GAE.
             ri = buf.rewards_int.cpu().numpy()                  # (n_steps, n_envs)
+            # Raw (pre-normalization) novelty: THIS is the curiosity-decay signal.
+            # mean_int_reward below is post-norm and hovers near a fixed scale by
+            # construction, so it can't show whether novelty is actually falling.
+            mean_raw_novelty = float(ri.mean())
             disc_returns = np.array([rff.update(ri[t]) for t in range(ri.shape[0])])
             reward_rms.update(disc_returns.reshape(-1))
             ri_norm = np.clip(ri / (np.sqrt(reward_rms.var) + 1e-8),
@@ -484,6 +591,11 @@ def train(
             obs_mean_t = torch.as_tensor(obs_rms.mean, dtype=torch.float32, device=device)
             obs_std_t = torch.as_tensor(obs_rms.std, dtype=torch.float32, device=device)
 
+        # Raw per-stream advantage scales (pre per-minibatch normalization). The
+        # gap shows what ext_coef:int_coef is really weighting against.
+        adv_ext_std = float(b_advantages.std().item())
+        adv_int_std = float(b_adv_int.std().item()) if cfg.rnd_enabled else 0.0
+
         indices = np.arange(batch_size_local)
         last_pg_loss = last_v_loss = last_entropy = 0.0
         last_rnd_loss = last_v_int_loss = 0.0
@@ -498,10 +610,26 @@ def train(
                 mb_returns = b_returns[mb_idx]
                 mb_values_old = b_values[mb_idx]
 
-                # Combine extrinsic + intrinsic advantage (RND), then normalize.
+                # Combine extrinsic + intrinsic advantage (RND). Normalize EACH
+                # stream to unit std FIRST, then weight: otherwise the two streams
+                # sit on different scales and ext_coef:int_coef is not the actual
+                # ratio of pull. Per-stream normalization makes the coefficients
+                # mean what they say. Plain-PPO path keeps the single combined norm.
                 if cfg.rnd_enabled:
-                    mb_adv = cfg.ext_coef * mb_adv + cfg.int_coef * b_adv_int[mb_idx]
-                mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                    a_ext = b_advantages[mb_idx]
+                    a_int = b_adv_int[mb_idx]
+                    a_ext = (a_ext - a_ext.mean()) / (a_ext.std() + 1e-8)
+                    a_int = (a_int - a_int.mean()) / (a_int.std() + 1e-8)
+                    # Divide by the coefficient-vector norm so the COMBINED
+                    # advantage stays ~unit scale (matching plain-PPO and prior
+                    # runs) while ext_coef:int_coef stays the true ratio of pull.
+                    # Without this, two unit-std streams at 2:1 give std
+                    # ~sqrt(5)=2.24 — a silent ~2.2x policy-step inflation.
+                    coef_norm = (cfg.ext_coef ** 2 + cfg.int_coef ** 2) ** 0.5
+                    mb_adv = (cfg.ext_coef * a_ext
+                              + cfg.int_coef * a_int) / (coef_norm + 1e-8)
+                else:
+                    mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
                 logits, values_new, values_int_new = net(mb_obs)
                 dist = Categorical(logits=logits)
@@ -543,7 +671,15 @@ def train(
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(params, cfg.max_grad_norm)
+                # Separate grad-norm budgets for policy vs RND predictor: a
+                # shared clip lets a large early predictor gradient eat into the
+                # policy's norm budget (throttling the policy update) and vice
+                # versa. Clip each group to its own max_grad_norm.
+                nn.utils.clip_grad_norm_(net.parameters(), cfg.max_grad_norm)
+                if rnd_model is not None:
+                    nn.utils.clip_grad_norm_(
+                        rnd_model.predictor.parameters(), cfg.max_grad_norm
+                    )
                 optimizer.step()
 
                 last_pg_loss = float(policy_loss.item())
@@ -574,7 +710,8 @@ def train(
         if dctx.is_main and iteration % cfg.log_every == 0:
             ts = time.strftime("%H:%M:%S")
             rnd_str = (
-                f"int_r {mean_int_reward:+.4f}  rnd_loss {last_rnd_loss:.4f}  "
+                f"int_r {mean_int_reward:+.4f}  nov_raw {mean_raw_novelty:.4f}  "
+                f"rnd_loss {last_rnd_loss:.4f}  advσ_e/i {adv_ext_std:.2f}/{adv_int_std:.2f}  "
                 if cfg.rnd_enabled else ""
             )
             print(
@@ -600,21 +737,35 @@ def train(
                 "value_loss": last_v_loss,
                 "entropy": last_entropy,
                 "mean_int_reward": mean_int_reward,
+                "mean_raw_novelty": mean_raw_novelty,
                 "rnd_loss": last_rnd_loss,
                 "value_int_loss": last_v_int_loss,
+                "adv_ext_std": adv_ext_std,
+                "adv_int_std": adv_int_std,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "iter_seconds": iter_dt,
                 "samples_per_second": sps,
             })
 
-        if ckpt_dir is not None and iteration % cfg.save_every == 0:
+        # Checkpoint on the cadence AND always on the final iteration, so the
+        # last save_every-remainder iterations aren't stranded in the bare
+        # final.pt (which would silently demote a resume to weights-only).
+        # Checkpoint on the cadence AND always on the final iteration, so the
+        # last save_every-remainder iterations aren't stranded in final.pt.
+        if ckpt_dir is not None and (
+            iteration % cfg.save_every == 0 or iteration == n_iterations
+        ):
             path = ckpt_dir / f"iter_{iteration:06d}.pt"
-            # Unwrap DDP for checkpoint compatibility with single-process load.
-            state_dict = (
-                net.module.state_dict() if dctx.is_distributed else net.state_dict()
-            )
-            torch.save(state_dict, path)
+            torch.save(_build_ckpt(iteration), path)
             print(f"  -> saved checkpoint {path}")
+
+    # Final checkpoint as a FULL dict so resuming from the canonical final.pt
+    # continues the run instead of silently downgrading to a weights-only
+    # warm-start. (run_dir is the metrics.csv parent.)
+    if dctx.is_main and cfg.log_csv:
+        final_path = Path(cfg.log_csv).parent / "final.pt"
+        torch.save(_build_ckpt(iteration), final_path)
+        print(f"Saved final checkpoint -> {final_path}")
 
     if csv_logger is not None:
         csv_logger.close()

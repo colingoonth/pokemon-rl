@@ -51,8 +51,21 @@ def load_policy(checkpoint: Path | None, obs_shape: tuple[int, ...], n_actions: 
     if not checkpoint.exists():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     net = ActorCritic(obs_shape, n_actions=n_actions)
-    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    net.load_state_dict(state)
+    # weights_only=False so full-resume dict checkpoints (with optimizer / numpy
+    # normalizer state) load; these are our own trusted files. Full-resume
+    # checkpoints wrap weights under "net"; bare/legacy ones are a plain dict.
+    loaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state = loaded["net"] if isinstance(loaded, dict) and "net" in loaded else loaded
+    missing, unexpected = net.load_state_dict(state, strict=False)
+    critical = [k for k in missing if k.startswith(("actor.", "backbone.", "fc."))]
+    if critical:
+        raise SystemExit(
+            f"checkpoint is missing policy-critical keys {critical}; "
+            f"architecture mismatch — refusing to eval a partly-random net."
+        )
+    if missing or unexpected:
+        print(f"NOTE: load_state_dict missing={sorted(missing)} "
+              f"unexpected={sorted(unexpected)}")
     net.eval()
     return net
 
@@ -89,7 +102,7 @@ def main() -> None:
             else:
                 obs_t = torch.from_numpy(obs).unsqueeze(0)
                 with torch.no_grad():
-                    logits, _ = net(obs_t)
+                    logits = net(obs_t)[0]  # (logits, value_ext, value_int)
                 if args.stochastic:
                     action = int(Categorical(logits=logits).sample().item())
                 else:

@@ -27,10 +27,24 @@ class CSVLogger:
     def log(self, row: dict[str, Any]) -> None:
         row = {"wall_time_s": round(time.time() - self._t0, 3), **row}
         if self._writer is None:
-            self._fieldnames = list(row.keys())
-            self._file = self.path.open("w", newline="")
-            self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
-            self._writer.writeheader()
+            # If the file already exists with content (a resumed run writing to
+            # the same path), APPEND and reuse its header so prior history isn't
+            # truncated and rows stay column-aligned. Otherwise create fresh.
+            existing_header: list[str] | None = None
+            if self.path.exists() and self.path.stat().st_size > 0:
+                with self.path.open("r", newline="") as f:
+                    first = f.readline().strip()
+                if first:
+                    existing_header = first.split(",")
+            if existing_header is not None:
+                self._fieldnames = existing_header
+                self._file = self.path.open("a", newline="")
+                self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
+            else:
+                self._fieldnames = list(row.keys())
+                self._file = self.path.open("w", newline="")
+                self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
+                self._writer.writeheader()
         assert self._writer is not None and self._fieldnames is not None
         # Drop unexpected keys to keep the file stable
         clean = {k: row.get(k, "") for k in self._fieldnames}

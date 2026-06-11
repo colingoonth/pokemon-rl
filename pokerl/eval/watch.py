@@ -59,10 +59,26 @@ def parse_args() -> argparse.Namespace:
 def load_net(checkpoint: Path, obs_shape: tuple[int, ...], n_actions: int) -> ActorCritic:
     net = ActorCritic(obs_shape, n_actions=n_actions)
     if checkpoint.exists():
-        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        # weights_only=False so full-resume dict checkpoints (with optimizer /
+        # numpy normalizer state) load; these are our own trusted files.
+        loaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        # Full-resume checkpoints wrap weights under "net"; bare/legacy and
+        # weights-only warm-start checkpoints are a plain state_dict.
+        state = loaded["net"] if isinstance(loaded, dict) and "net" in loaded else loaded
         # strict=False so the watcher loads both old 2-head checkpoints (no
-        # critic_int) and new 3-head RND checkpoints. Only the actor matters here.
-        net.load_state_dict(state, strict=False)
+        # critic_int) and new 3-head RND checkpoints. But DON'T swallow the
+        # result: a missing actor/backbone key means we'd silently eval a
+        # partly-random net, which looks like a "trained" policy behaving badly.
+        missing, unexpected = net.load_state_dict(state, strict=False)
+        critical = [k for k in missing if k.startswith(("actor.", "backbone.", "fc."))]
+        if critical:
+            raise RuntimeError(
+                f"checkpoint is missing policy-critical keys {critical}; "
+                f"architecture mismatch — refusing to eval a partly-random net."
+            )
+        if missing or unexpected:
+            print(f"NOTE: load_state_dict missing={sorted(missing)} "
+                  f"unexpected={sorted(unexpected)}")
         print(f"Loaded checkpoint: {checkpoint}")
     else:
         print(f"NOTE: no checkpoint at {checkpoint}; running with untrained policy")

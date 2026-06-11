@@ -119,10 +119,9 @@ def main() -> None:
         )
 
     try:
-        net = train(env_fn, cfg, resume_path=args.resume)
-        if dctx.is_main:
-            torch.save(net.state_dict(), run_dir / "final.pt")
-            print(f"Saved final checkpoint -> {run_dir / 'final.pt'}")
+        # train() writes run_dir/final.pt as a FULL checkpoint (resumable) on
+        # completion; no bare re-save here (that would clobber it).
+        train(env_fn, cfg, resume_path=args.resume)
     finally:
         # Drain any in-flight collectives before tearing down the process
         # group, then destroy. envs are already closed inside train();
