@@ -73,6 +73,12 @@ HARD_GATE_BEAT_BROCK      = (0xD755, 7)   # EVENT_BEAT_BROCK,       index 119
 # vector: marks the post-Oak's-Lab state (index 36, the bit adjacent to POKEDEX).
 EVENT_GOT_POKEBALLS_FROM_OAK = (0xD74B, 4)
 
+# Intermediate storyladder rungs (Day-11, verified against BOTH pret/pokered
+# event_constants.asm AND drubinstein/pokemonred_puffer events.py):
+EVENT_BATTLED_RIVAL_IN_OAKS_LAB = (0xD74B, 3)  # rival battle WON (the start-state opener), index 35
+EVENT_GOT_POTION_SAMPLE = (0xD75F, 0)   # Viridian Mart clerk free sample, index 192 — early Viridian beat
+EVENT_GOT_TM34          = (0xD755, 6)   # Brock's TM reward, index 118 — fires with the Brock win
+
 # Pokedex owned bitfield (19 bytes, 1 bit per species, 151 species).
 ADDR_POKEDEX_OWNED_START = 0xD2F7
 ADDR_POKEDEX_OWNED_END   = 0xD309  # inclusive
@@ -90,7 +96,15 @@ MAP_PALLET_TOWN        = 0x00
 MAP_VIRIDIAN_CITY      = 0x01
 MAP_PEWTER_CITY        = 0x02
 MAP_ROUTE_1            = 0x0C
+MAP_ROUTE_2            = 0x0D
 MAP_OAKS_LAB           = 0x28
+# Brock-path maps north of Viridian. Verified Day-11 against BOTH pret/pokered
+# constants/map_constants.asm AND drubinstein/pokemonred_puffer. Reachable only
+# after EVENT_GOT_POKEDEX (the Viridian old-man gate); the south gate (0x32) is
+# the V0.5.1 storyladder GOAL — first map past the wedge.
+MAP_VIRIDIAN_FOREST_SOUTH_GATE = 0x32
+MAP_VIRIDIAN_FOREST            = 0x33
+MAP_VIRIDIAN_FOREST_NORTH_GATE = 0x2F
 
 # Pokemon Center map ids (from pret/pokered constants/map_constants.asm).
 # Viridian + Pewter are V1-critical (Brock route); others included for forward compat.
@@ -285,6 +299,19 @@ def beat_brock(mem: MemoryView) -> bool:
 
 def got_pokeballs_from_oak(mem: MemoryView) -> bool:
     return event_flag_bit(mem, *EVENT_GOT_POKEBALLS_FROM_OAK)
+
+
+def battled_rival_in_oaks_lab(mem: MemoryView) -> bool:
+    """True once the opening rival battle is won (the start-state opener)."""
+    return event_flag_bit(mem, *EVENT_BATTLED_RIVAL_IN_OAKS_LAB)
+
+
+def got_potion_sample(mem: MemoryView) -> bool:
+    return event_flag_bit(mem, *EVENT_GOT_POTION_SAMPLE)
+
+
+def got_tm34(mem: MemoryView) -> bool:
+    return event_flag_bit(mem, *EVENT_GOT_TM34)
 
 
 def progress_bits(mem: MemoryView) -> "list[float]":

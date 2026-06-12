@@ -1132,6 +1132,11 @@ class RewardV0_4_2_center(RewardV0_4_1):
     # New BATTLE_STALL machinery
     BATTLE_STALL_THRESHOLD = 30
     BATTLE_STALL_COEF = -0.01
+    # Per-step penalty ramp: penalty = COEF * min(steps_over_threshold, RAMP).
+    # RAMP=1 keeps the original FLAT -0.01/step (current behavior, all classes);
+    # a larger RAMP makes sustained stalling escalate then cap (used by V0.5.3+
+    # to kill the battle-stall equilibrium).
+    BATTLE_STALL_RAMP = 1
 
     def __init__(self) -> None:
         super().__init__()
@@ -1168,9 +1173,11 @@ class RewardV0_4_2_center(RewardV0_4_1):
                 self._battle_stall_counter = 0
             else:
                 self._battle_stall_counter += 1
-                if self._battle_stall_counter > self.BATTLE_STALL_THRESHOLD:
+                over = self._battle_stall_counter - self.BATTLE_STALL_THRESHOLD
+                if over > 0:
+                    ramp = min(over, self.BATTLE_STALL_RAMP)
                     reward += self._track(
-                        "BATTLE_STALL", self.BATTLE_STALL_COEF
+                        "BATTLE_STALL", self.BATTLE_STALL_COEF * ramp
                     )
         else:
             self._battle_stall_counter = 0
@@ -1450,6 +1457,264 @@ class RewardV0_5_skeleton(RewardV0_4_2_center):
         return reward
 
 
+class RewardV0_5_1_storyladder(RewardV0_4_2_center):
+    """V0.5.1: the V0.5 RND combat skeleton + a story-progress MULTIPLIER ladder.
+
+    Diagnosis (Day-11): RAM-feature RND (job 22995) broke the exploration
+    plateau (tiles/env 1 -> 661) but the agent earned its ENTIRE return from
+    combat (HEAL_QUAD, BEAT_MON, LEVEL) and ZERO from story — it covers the map
+    but never plays the game. Two structural causes:
+      1. The only extrinsic story signal was three sparse one-shot gates, so
+         there is no gradient pulling the policy ALONG the story.
+      2. The forced Oak backtrack (parcel -> Pokedex) is HARD-GATED: the
+         Viridian old man (ViridianCity.asm) physically shoves the player south
+         off the north exit until EVENT_GOT_POKEDEX is set. The agent literally
+         cannot reach Viridian Forest without completing the parcel loop, and
+         nothing told it to.
+
+    Design (your call, validated by research): instead of additive constants,
+    a story multiplier `M(stage)` that scales the dense combat/level/heal
+    signal, so a high score REQUIRES story progress (grinding alone caps out).
+    Each verified, monotone, on-path checkpoint is a "rung": reaching it (a) adds
+    a one-shot bonus (the dense pull + a value-seed past PPO's advantage
+    normalization, which would otherwise wash out a pure scale) and (b) raises
+    M for all subsequent reward. M climbs ~2.85x at the forest, ~4.35x at Brock.
+
+    Honest scope (Day-11 3-researcher audit): verified monotone flags are SPARSE
+    — there are three flag DESERTS (Route 1, the parcel backtrack, the Forest
+    maze) with no on-path flag. This ladder does NOT pretend to flag-guide those:
+    map-entry rungs break them up, and RND carries the rest — in particular the
+    parcel-bit flip re-spikes RND novelty across the backtrack tiles (the
+    mechanism RAM-RND was built for). Flags+maps are the anchors; RND is the
+    transport between them. Avoidable/off-path/non-monotone flags (Forest
+    trainers, museum, BOUGHT_MUSEUM_TICKET which Pewter's script resets each
+    frame) are deliberately excluded.
+
+    Inherits RewardV0_4_2_center (combat/level/heal) directly and re-zeroes
+    EXPLORE/STUCK like RewardV0_5_skeleton; the skeleton's 3 gates are subsumed
+    into the ladder below (parcel/pokedex/brock), so this does NOT extend the
+    skeleton (would double-pay).
+    """
+
+    EXPLORE_COEF = 0.0             # exploration is RND's job
+    STUCK_PENALTY_PER_STEP = 0.0   # anti-camp penalty punished the backtrack
+
+    # Ordered story ladder, start-state -> Brock. Each entry:
+    #   (key, kind, target, one_shot_bonus, mult_increment)
+    # kind "flag": target is an rm.<predicate>(mem)->bool (verified flag bit).
+    # kind "map":  target is a map_id; the rung fires on FIRST visit to that map.
+    # All flags/maps cross-checked vs pret/pokered + pokemonred_puffer (Day-11).
+    _LADDER: "list[tuple]" = [
+        ("POKEBALLS",     "flag", rm.got_pokeballs_from_oak,           5.0,  0.10),
+        ("ROUTE_1",       "map",  rm.MAP_ROUTE_1,                      4.0,  0.10),
+        ("POTION_SAMPLE", "flag", rm.got_potion_sample,               3.0,  0.05),
+        ("VIRIDIAN",      "map",  rm.MAP_VIRIDIAN_CITY,                6.0,  0.15),
+        ("VIRIDIAN_MART", "map",  rm.MAP_VIRIDIAN_MART,                4.0,  0.05),
+        ("PARCEL",        "flag", rm.got_oaks_parcel,                 10.0,  0.20),
+        # --- backtrack staircase: parcel -> Oak (the flagless desert RND alone
+        #     never crossed in a full 30M run). Progress-conditioned re-entry. ---
+        ("RETURN_ROUTE_1", "map_flag", (rm.MAP_ROUTE_1, rm.got_oaks_parcel),     6.0,  0.10),  # halfway home
+        ("RETURN_PALLET",  "map_flag", (rm.MAP_PALLET_TOWN, rm.got_oaks_parcel),  8.0,  0.15),  # back in town
+        ("AT_OAK_PARCEL",  "map_flag", (rm.MAP_OAKS_LAB, rm.got_oaks_parcel),    12.0,  0.20),  # at the delivery point
+        ("POKEDEX",       "flag", rm.got_pokedex,                     30.0,  0.50),  # ★ opens north gate
+        ("ROUTE_2",       "map",  rm.MAP_ROUTE_2,                     12.0,  0.30),  # north is now passable
+        ("FOREST_SOUTH",  "map",  rm.MAP_VIRIDIAN_FOREST_SOUTH_GATE,  20.0,  0.40),  # ◆ frontier goal
+        ("FOREST",        "map",  rm.MAP_VIRIDIAN_FOREST,             4.0,  0.10),
+        ("FOREST_NORTH",  "map",  rm.MAP_VIRIDIAN_FOREST_NORTH_GATE,   8.0,  0.20),
+        ("PEWTER",        "map",  rm.MAP_PEWTER_CITY,                 15.0,  0.30),
+        ("PEWTER_GYM",    "map",  rm.MAP_PEWTER_GYM,                  15.0,  0.30),
+        ("TM34",          "flag", rm.got_tm34,                        10.0,  0.10),
+        ("BEAT_BROCK",    "flag", rm.beat_brock,                      50.0,  0.50),  # ★ V1 goal
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fired: set[str] = set()
+        self._mult = 1.0
+        self._seen_maps: set[int] = set()
+
+    def _rung_hit(self, mem, kind, target) -> bool:
+        if kind == "flag":
+            return target(mem)
+        if kind == "map":
+            return target in self._seen_maps
+        # "map_flag": progress-conditioned re-entry — fires only while physically
+        # ON `map_id` AND a story predicate holds. Densifies the parcel->Oak
+        # BACKTRACK, a flagless desert that plain first-entry map rungs miss
+        # (Route 1 / Pallet / Oak's Lab were all visited outbound, so re-entry
+        # carrying the parcel is the only new monotone state on the return leg).
+        map_id, predicate = target
+        return rm.map_id(mem) == map_id and predicate(mem)
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        self._fired = set()
+        self._mult = 1.0
+        # Pre-mask rungs already satisfied at the (warm/mid-game) start state so
+        # we don't pay one-shots for past progress, but DO seed the multiplier
+        # to the correct starting stage.
+        self._seen_maps = {rm.map_id(mem)}
+        for key, kind, target, _bonus, inc in self._LADDER:
+            if self._rung_hit(mem, kind, target):
+                self._fired.add(key)
+                self._mult += inc
+
+    def compute(self, mem) -> float:
+        base = super().compute(mem)
+        self._seen_maps.add(rm.map_id(mem))
+
+        # Scale the dense combat/level/heal signal by the story multiplier.
+        # Tracked as its own component (M-1)*base so the attribution breakdown
+        # still sums to the returned reward.
+        reward = base + self._track("STORY_MULT", (self._mult - 1.0) * base)
+
+        # Fire any newly-reached rungs: one-shot bonus + raise M for next step.
+        for key, kind, target, bonus, inc in self._LADDER:
+            if key in self._fired:
+                continue
+            if self._rung_hit(mem, kind, target):
+                self._fired.add(key)
+                self._mult += inc
+                reward += self._track("RUNG_" + key, bonus)
+        return reward
+
+
+class RewardV0_5_2_storyladder(RewardV0_5_1_storyladder):
+    """V0.5.2: storyladder + potential-based "danger-zone" HP, REPLACING the
+    farmable quadratic heal/damage.
+
+    The V0.5.1 probe (job 23408) reproduced the heal-farm. HEAL_QUAD is a
+    quadratic on the heal TRANSITION; because PC heals are instantaneous (one
+    big delta) while battle damage is gradual (many small deltas), the quadratic
+    always rewards the big heal more than it penalizes the slow damage that set
+    it up -> net-positive self-harm farm (+22.7 heal vs -1.5 damage in eval),
+    with the agent stalling battles to bleed HP for big heals (827 stall fires).
+
+    Fix (Colin's framing: "healing is a necessary rest after a fight, not a
+    reward to farm"): reward the HP STATE via a potential, not the heal act.
+        phi(hp_frac) = -C * max(0, T - hp_frac)**2          # T = 0.5, C = 8
+        r += phi(hp_now) - phi(hp_prev)
+    Properties:
+      - Potential-based -> telescopes -> granularity-invariant, so the
+        instant-heal-vs-gradual-damage exploit vanishes; a hurt->heal round
+        trip nets ~zero. Healing repays the debt; it is not profit.
+      - Flat above T = 50% HP: a WON fight that ends healthy costs NOTHING, so
+        the agent is never punished for winning -> no fight-timidity (the
+        explicit risk). The term only bites in the 0-50% danger zone, leaning
+        the agent to rest before walking into the next fight hurt.
+      - C = 8 pins the worst case (full plunge 0.5->0) at -0.25*C = -2.0, ~one
+        kill -> HP is minor upkeep, dominated by combat + the story multiplier
+        + FAINT(-5)/LOSE(-10). Sizing from two independent analyses (window
+        [8,16]); chose the timidity-safe floor. Bump toward 12 if the probe
+        shows the agent ignoring HP and fainting.
+
+    HEAL_QUAD / DAMAGE_QUAD are DISABLED (coef 0) — the danger-zone term
+    REPLACES them. Added unmultiplied (after the story multiplier) so the
+    potential stays policy-invariant (a per-step M would break telescoping).
+    The faint->respawn HP jump (prev == 0 -> full) is skipped so respawning
+    cannot refund the faint.
+    """
+
+    HEAL_QUAD_COEF = 0.0       # disabled — replaced by potential-based danger-zone HP
+    DAMAGE_QUAD_COEF = 0.0     # disabled — same
+    HP_DANGER_C = 8.0          # potential scale; worst-case debt = 0.25*C = 2.0 (~one kill)
+    HP_DANGER_T = 0.5          # danger threshold: term is flat (0) above this HP fraction
+
+    def _hp_potential(self, f: float) -> float:
+        gap = self.HP_DANGER_T - f
+        return -self.HP_DANGER_C * gap * gap if gap > 0.0 else 0.0
+
+    def compute(self, mem) -> float:
+        prev_hp = self._last_hp_frac          # end-of-previous-step HP fraction
+        reward = super().compute(mem)         # storyladder (mult + rungs); heal/dmg quads off
+        now_hp = self._last_hp_frac           # super chain updated this to current HP
+        # Skip the faint->respawn jump: prev == 0 means the party was fainted,
+        # so any rise from 0 is a blackout respawn, not a chosen heal.
+        if prev_hp > 1e-6:
+            dphi = self._hp_potential(now_hp) - self._hp_potential(prev_hp)
+            if dphi != 0.0:
+                reward += self._track("HP_DANGER", dphi)
+        return reward
+
+
+class RewardV0_5_3_storyladder(RewardV0_5_2_storyladder):
+    """V0.5.3: fix the battle-stall equilibrium that V0.5.2 exposed.
+
+    The V0.5.2 probe (job 23421) collapsed onto a degenerate stall: the argmax
+    policy sat in the OPENING rival battle for 32715/32768 steps, never
+    resolving it (0 rungs, 0 tiles). Removing the heal-farm removed the agent's
+    (crude) reason to fight; with fighting all-downside (faint/lose/HP_DANGER)
+    and stalling costing a flat -0.01/step, stalling became the safest action.
+
+    Two changes, no new farm:
+      1. RIVAL_WIN rung (+25, first on the ladder): a big one-shot for winning
+         the opening rival battle (EVENT_BATTLED_RIVAL_IN_OAKS_LAB). The rival
+         fight is where fight-reluctance is WORST — longest early battle, ends
+         lowest HP, so HP_DANGER deters it most — and it is exactly where the
+         agent froze. A large win bonus offsets that deterrent where it bites
+         hardest. One-shot flag -> non-farmable. The rival battle is a TRAINER
+         battle (in_battle == 2, unfleeable), so with (2) the agent's only good
+         move is to attack and win.
+      2. Escalating BATTLE_STALL (BATTLE_STALL_RAMP = 100): the stall penalty
+         now GROWS with sustained stalling (-0.01/step ramping to -1.0/step over
+         ~100 over-threshold steps, then capped) instead of a flat -0.01.
+         Indefinite stalling becomes catastrophic in ANY battle, so the stall
+         can't simply relocate to a later fight. (Base V0.4.2 keeps RAMP = 1 =
+         the old flat behavior.)
+    """
+
+    BATTLE_STALL_RAMP = 100   # escalate stall penalty (flat=1): -0.01 -> -1.0/step cap
+
+    # RIVAL_WIN prepended as the opening beat; the rest of the ladder inherited.
+    _LADDER = [
+        ("RIVAL_WIN", "flag", rm.battled_rival_in_oaks_lab, 25.0, 0.15),
+    ] + RewardV0_5_1_storyladder._LADDER
+
+
+class RewardV0_5_4_storyladder(RewardV0_5_3_storyladder):
+    """V0.5.4: dense enemy-damage "engagement" reward — the function the
+    heal-farm was secretly providing.
+
+    Three probes converged on this. WITH the heal-farm (v0.5.1) the agent won
+    the rival and reached Route 1; WITHOUT it (v0.5.2/.3) it froze in the FIGHT
+    menu and stalled the opening battle for the whole episode, even when
+    stalling was made catastrophic (-32688) AND winning paid +25. So incentives
+    were never the bottleneck — the agent had no DENSE gradient for the
+    fine-grained "land a hit" behavior. The heal-farm accidentally supplied it
+    (it rewarded the HP swings of trading blows); removing it left only
+    end-of-battle (win) and absence-of-progress (stall) signals, neither of
+    which teaches attacking.
+
+    Fix: reward dealing damage directly. ENEMY_DMG = COEF * (enemy HP knocked
+    off this step), LINEAR so it's granularity-invariant (no farm-by-chunking)
+    and bounded per battle by the enemy's HP. Only positive deltas count, so a
+    fresh enemy being sent in (HP jumps up) or battle start pays nothing. This
+    is the clean, non-farmable version of the heal-farm's hidden role: a per-hit
+    gradient that pulls the policy out of the menu-stall toward winning.
+    RIVAL_WIN (+25) stays as the capstone.
+
+    Also reverts the escalating stall to FLAT (BATTLE_STALL_RAMP = 1): the
+    v0.5.3 ramp to -1.0/step produced -32688 episodes whose variance drowned the
+    learning signal under PPO's per-batch advantage normalization. With a real
+    positive reason to attack, the gentle flat -0.01 stall (which sufficed in
+    v0.5.1) is enough.
+    """
+
+    BATTLE_STALL_RAMP = 1          # revert the v0.5.3 variance-bomb ramp to flat
+    ENEMY_DMG_COEF = 0.15          # reward per point of enemy HP dealt (dense engagement)
+
+    def compute(self, mem) -> float:
+        prev_enemy_hp = self._last_enemy_hp
+        prev_in_battle = self._last_in_battle
+        reward = super().compute(mem)        # V0.5.3 chain updates _last_enemy_hp
+        # Dense engagement signal: reward enemy HP knocked off this step.
+        if rm.in_battle(mem) != 0 and prev_in_battle != 0:
+            dmg = prev_enemy_hp - rm.enemy_mon_hp(mem)
+            if dmg > 0:
+                reward += self._track("ENEMY_DMG", self.ENEMY_DMG_COEF * dmg)
+        return reward
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1513,6 +1778,10 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_4_5_dense": RewardV0_4_5_dense,
     "RewardV0_4_5_curated": RewardV0_4_5_curated,
     "RewardV0_5_skeleton": RewardV0_5_skeleton,
+    "RewardV0_5_1_storyladder": RewardV0_5_1_storyladder,
+    "RewardV0_5_2_storyladder": RewardV0_5_2_storyladder,
+    "RewardV0_5_3_storyladder": RewardV0_5_3_storyladder,
+    "RewardV0_5_4_storyladder": RewardV0_5_4_storyladder,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,

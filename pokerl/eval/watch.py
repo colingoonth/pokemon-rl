@@ -112,6 +112,8 @@ def main() -> None:
     # Fires: count of steps that contributed > 0 (negative or positive).
     comp_total: dict[str, float] = {}
     comp_fires: dict[str, int] = {}
+    # First step at which each story rung (RUNG_*) fired this rollout.
+    rung_step: dict[str, int] = {}
     start = time.time()
 
     for step in range(args.steps):
@@ -134,6 +136,8 @@ def main() -> None:
             for name, val in components.items():
                 comp_total[name] = comp_total.get(name, 0.0) + val
                 comp_fires[name] = comp_fires.get(name, 0) + 1
+                if name.startswith("RUNG_") and name not in rung_step:
+                    rung_step[name] = step + 1
 
         if args.record and step % 4 == 0:
             frames.append(env.render())
@@ -167,6 +171,32 @@ def main() -> None:
         residual = total_reward - attrib_sum
         if abs(residual) > 1e-4:
             print(f"  {'unattributed':<{name_w}}  {residual:+10.3f}")
+
+    # Story-ladder detail (V0.5.1+ storyladder reward classes expose _LADDER /
+    # _mult / _fired). Shows which rungs were reached, in path order, the step
+    # each fired, and the running story multiplier — so a single silent run
+    # reads as "how far up the story did it climb."
+    ladder = getattr(rf, "_LADDER", None)
+    if ladder is not None:
+        fired = getattr(rf, "_fired", set())
+        final_mult = getattr(rf, "_mult", 1.0)
+        reached = [e[0] for e in ladder if e[0] in fired]
+        furthest = reached[-1] if reached else "(none)"
+        print()
+        print("=== Story ladder ===")
+        print(f"  multiplier reached:  {final_mult:.2f}x")
+        print(f"  rungs reached:       {len(reached)}/{len(ladder)}   furthest: {furthest}")
+        key_w = max(len(e[0]) for e in ladder)
+        m = 1.0
+        for key, _kind, _target, bonus, inc in ladder:
+            if key in fired:
+                m += inc
+                rk = "RUNG_" + key
+                when = f"step {rung_step[rk]}" if rk in rung_step else "pre-masked at reset"
+                print(f"  [x] {key:<{key_w}}  one-shot +{bonus:>5.1f}   M={m:4.2f}   {when}")
+            else:
+                print(f"  [ ] {key:<{key_w}}  (would add +{inc:.2f} mult)")
+
     if args.record:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         out = OUT_DIR / "watch_rollout.gif"

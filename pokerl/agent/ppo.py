@@ -101,16 +101,43 @@ class PPOConfig:
     state_path: str | None = None  # optional env start-state override; None = env default
     frame_skip: int = 1            # repeat the action+24-frame loop N times per agent step
 
+    # --- CPU throughput levers (default = prior behavior; see Day 10 sweep) ---
+    torch_threads: int = 1         # intra-op ATen/BLAS threads for the MAIN process only
+                                   # (policy forward + PPO update). Env workers stay
+                                   # single-threaded via OMP_NUM_THREADS=1 in the env, set
+                                   # before they spawn. >1 only helps the GIL-bound coordinator.
+    vec_context: str = "spawn"     # AsyncVectorEnv start method. "spawn" is required when a
+                                   # CUDA context exists (DDP); "fork" is cheaper IPC + startup
+                                   # and safe on the GPU-less Genoa CPU nodes (no CUDA to re-init).
+
     # --- RND / curiosity (all defaulted so the plain-PPO path is unchanged) ---
     rnd_enabled: bool = False       # master switch; off = exact pre-RND behavior
     ext_coef: float = 2.0           # weight on extrinsic advantage
-    int_coef: float = 1.0           # weight on intrinsic advantage
+    int_coef: float = 1.0           # weight on intrinsic advantage (start value)
+    # Curiosity -> exploitation handoff: linearly anneal int_coef from int_coef
+    # to int_coef_final over training (same `frac` schedule as anneal_lr). Lets
+    # RND bootstrap exploration early, then hand off to the (now dense) extrinsic
+    # story signal so the policy commits to playing the game. ext_coef is held
+    # fixed; as int_coef -> floor, coef_norm -> ext_coef and the combined
+    # advantage collapses cleanly toward pure extrinsic. Off by default (exact
+    # prior behavior); int_coef_final ignored unless anneal_int_coef is true.
+    anneal_int_coef: bool = False
+    int_coef_final: float = 0.0     # floor int_coef anneals toward
     int_gamma: float = 0.99         # intrinsic discount (separate, non-episodic stream)
     rnd_update_proportion: float = 0.25  # fraction of minibatch used to train the predictor
     rnd_feature_dim: int = 256      # target/predictor output width
     rnd_obs_norm_steps: int = 1024  # random pre-rollout steps to seed obs normalization
     rnd_obs_clip: float = 5.0       # clip normalized obs to +/- this
     rnd_int_clip: float = 5.0       # clip normalized intrinsic reward to +/- this
+    # --- RND input mode (Day 11: animation-invariant curiosity) ---
+    rnd_input: str = "frame"        # "frame" = conv-over-pixels (original, noisy-TV prone on
+                                    # overworld animation); "ram" = map_id/x/y + progress, so
+                                    # novelty is animation-invariant and a story-flag flip
+                                    # refreshes it across the map (drives the Oak backtrack).
+    rnd_num_maps: int = 256         # map_id embedding-table size (ram mode)
+    rnd_n_fourier: int = 128        # random Fourier features for (x,y) (ram mode)
+    rnd_fourier_scale: float = 16.0 # Fourier frequency scale = spatial-granularity knob (ram mode):
+                                    # higher = sharper per-tile novelty, lower = smoother coverage
 
 
 @dataclass
@@ -130,7 +157,8 @@ class RolloutBuffer:
     # RND streams (None when rnd disabled)
     values_int: torch.Tensor | None = None
     rewards_int: torch.Tensor | None = None
-    rnd_frame: torch.Tensor | None = None      # landed single frame (uint8) for predictor training
+    rnd_frame: torch.Tensor | None = None      # landed single frame (uint8) for predictor training (frame mode)
+    rnd_state: torch.Tensor | None = None      # landed [map_id,x,y] (float32) for predictor training (ram mode)
     rnd_progress: torch.Tensor | None = None   # landed progress bits
     advantages: torch.Tensor = field(init=False)
     returns: torch.Tensor = field(init=False)
@@ -146,6 +174,8 @@ class RolloutBuffer:
         device: str,
         rnd: bool = False,
         progress_dim: int = 0,
+        rnd_input: str = "frame",
+        state_dim: int = 3,
     ) -> "RolloutBuffer":
         z2 = lambda: torch.zeros((n_steps, n_envs), dtype=torch.float32, device=device)
         buf = cls(
@@ -157,11 +187,14 @@ class RolloutBuffer:
             dones=z2(),
         )
         if rnd:
-            h, w = obs_shape[-2], obs_shape[-1]
             buf.values_int = z2()
             buf.rewards_int = z2()
-            buf.rnd_frame = torch.zeros((n_steps, n_envs, 1, h, w), dtype=torch.uint8, device=device)
             buf.rnd_progress = torch.zeros((n_steps, n_envs, progress_dim), dtype=torch.float32, device=device)
+            if rnd_input == "ram":
+                buf.rnd_state = torch.zeros((n_steps, n_envs, state_dim), dtype=torch.float32, device=device)
+            else:
+                h, w = obs_shape[-2], obs_shape[-1]
+                buf.rnd_frame = torch.zeros((n_steps, n_envs, 1, h, w), dtype=torch.uint8, device=device)
         return buf
 
     @staticmethod
@@ -227,6 +260,14 @@ def train(
     np.random.seed(cfg.seed + dctx.rank)
 
     envs = env_fn()
+    # Bump MAIN-process intra-op threads AFTER env_fn() — by now all async
+    # workers have spawned/forked inheriting OMP_NUM_THREADS=1, so they stay
+    # single-threaded while the GIL-bound coordinator (policy forward + PPO
+    # update) gets more cores. Setting this earlier would fan the workers too.
+    if cfg.torch_threads != 1:
+        torch.set_num_threads(cfg.torch_threads)
+        if dctx.is_main:
+            print(f"main-process torch threads: {torch.get_num_threads()}")
     assert isinstance(envs.single_action_space, gym.spaces.Discrete)
     n_envs_local = envs.num_envs
     # cfg.n_envs is the GLOBAL convention (total across all ranks). The
@@ -311,8 +352,16 @@ def train(
         from pokerl.env import ram_map as _rm
         progress_dim = _rm.PROGRESS_DIM
         frame_shape = (1, obs_shape[-2], obs_shape[-1])
-        rnd_model = RNDModel(frame_shape, progress_dim, feature_dim=cfg.rnd_feature_dim).to(device)
-        obs_rms = RunningMeanStd(shape=frame_shape)       # per-pixel obs normalization
+        rnd_model = RNDModel(
+            frame_shape, progress_dim, feature_dim=cfg.rnd_feature_dim,
+            input_mode=cfg.rnd_input, num_maps=cfg.rnd_num_maps,
+            n_fourier=cfg.rnd_n_fourier, fourier_scale=cfg.rnd_fourier_scale,
+        ).to(device)
+        # obs_rms only normalizes the frame path. In "ram" mode the encoder does
+        # its own deterministic featurization (embedding + Fourier on bounded
+        # RAM values), so the running per-pixel normalizer is unused.
+        if cfg.rnd_input == "frame":
+            obs_rms = RunningMeanStd(shape=frame_shape)   # per-pixel obs normalization
         reward_rms = RunningMeanStd(shape=())             # intrinsic-return std
         rff = RewardForwardFilter(cfg.int_gamma, n_envs_local)
 
@@ -336,8 +385,9 @@ def train(
         resume_iteration = int(resume_ckpt.get("iteration", 0))
         if cfg.rnd_enabled and "rnd" in resume_ckpt:
             rnd_model.load_state_dict(resume_ckpt["rnd"])
-            o = resume_ckpt["obs_rms"]
-            obs_rms.mean, obs_rms.var, obs_rms.count = o["mean"], o["var"], o["count"]
+            if obs_rms is not None and resume_ckpt.get("obs_rms") is not None:
+                o = resume_ckpt["obs_rms"]
+                obs_rms.mean, obs_rms.var, obs_rms.count = o["mean"], o["var"], o["count"]
             r = resume_ckpt["reward_rms"]
             reward_rms.mean, reward_rms.var, reward_rms.count = r["mean"], r["var"], r["count"]
             saved_rff = np.asarray(resume_ckpt["rff"], dtype=np.float64)
@@ -374,7 +424,8 @@ def train(
     # RND obs-norm warmup: seed obs_rms from random rollouts so the first
     # intrinsic rewards aren't computed against uninitialized statistics, then
     # re-reset so training episodes start cleanly at the curriculum state.
-    if cfg.rnd_enabled and cfg.rnd_obs_norm_steps > 0 and not rnd_state_restored:
+    if (cfg.rnd_enabled and cfg.rnd_input == "frame"
+            and cfg.rnd_obs_norm_steps > 0 and not rnd_state_restored):
         for _ in range(cfg.rnd_obs_norm_steps):
             a = np.array([envs.single_action_space.sample() for _ in range(n_envs_local)])
             o, _, _, _, _ = envs.step(a)
@@ -442,7 +493,7 @@ def train(
             # predictor's progress, and both running normalizers, or a resume
             # silently restarts exploration from a different random target.
             ckpt["rnd"] = rnd_model.state_dict()
-            ckpt["obs_rms"] = {
+            ckpt["obs_rms"] = None if obs_rms is None else {
                 "mean": obs_rms.mean, "var": obs_rms.var, "count": obs_rms.count,
             }
             ckpt["reward_rms"] = {
@@ -458,11 +509,24 @@ def train(
             for g in optimizer.param_groups:
                 g["lr"] = frac * cfg.learning_rate
 
+        # Curiosity -> exploitation handoff: linearly anneal int_coef from
+        # cfg.int_coef down to cfg.int_coef_final over training (same frac
+        # schedule as anneal_lr). RND bootstraps exploration early; as int_coef
+        # -> floor, coef_norm -> ext_coef and the combined advantage collapses
+        # toward pure extrinsic (the now-dense story signal). Off => constant.
+        if cfg.anneal_int_coef:
+            int_frac = 1.0 - (iteration - 1) / n_iterations
+            int_coef_now = cfg.int_coef_final + int_frac * (cfg.int_coef - cfg.int_coef_final)
+        else:
+            int_coef_now = cfg.int_coef
+
         buf = RolloutBuffer.empty(
             cfg.n_steps, n_envs_local, obs_shape, str(device),
             rnd=cfg.rnd_enabled, progress_dim=progress_dim,
+            rnd_input=cfg.rnd_input,
         )
 
+        rollout_t0 = time.perf_counter()
         for step in range(cfg.n_steps):
             global_step += n_envs_global
             buf.obs[step] = obs_t
@@ -516,36 +580,58 @@ def train(
                 # Substitute them (mirrors the extrinsic truncation bootstrap) so
                 # novelty, the predictor target, and the battle mask all use the
                 # real landed state — not the next episode's start.
-                landed = obs_np[:, -1:, :, :].copy()             # (n_envs,1,H,W)
+                ram_mode = cfg.rnd_input == "ram"
+                landed = obs_np[:, -1:, :, :].copy()             # (n_envs,1,H,W); frame mode
                 prog_np = np.asarray(info["progress"], dtype=np.float32).copy()
                 inbatt = np.asarray(info["in_battle"]).copy()
+                if ram_mode:
+                    state_np = np.asarray(info["rnd_state"], dtype=np.float32).copy()
                 fmask = np.asarray(info.get("_final_obs", np.zeros(n_envs_local, dtype=bool)))
                 if fmask.any():
                     fin = info.get("final_info", {})
                     fin_prog = fin.get("progress")
                     fin_batt = fin.get("in_battle")
+                    fin_state = fin.get("rnd_state")
                     for i in np.nonzero(fmask)[0]:
                         landed[i, 0] = info["final_obs"][i][-1]   # last frame of terminal stack
                         if fin_prog is not None:
                             prog_np[i] = np.asarray(fin_prog[i], dtype=np.float32)
                         if fin_batt is not None:
                             inbatt[i] = fin_batt[i]
-                obs_rms.update(landed.astype(np.float64))
-                fn = np.clip(
-                    (landed - obs_rms.mean) / (obs_rms.std + 1e-8),
-                    -cfg.rnd_obs_clip, cfg.rnd_obs_clip,
-                )
+                        if ram_mode and fin_state is not None:
+                            state_np[i] = np.asarray(fin_state[i], dtype=np.float32)
+                # Build the RND observation: raw state vector (ram mode) or the
+                # running-normalized + clipped frame (frame mode).
+                if ram_mode:
+                    rnd_obs = torch.as_tensor(state_np, dtype=torch.float32, device=device)
+                else:
+                    obs_rms.update(landed.astype(np.float64))
+                    fn = np.clip(
+                        (landed - obs_rms.mean) / (obs_rms.std + 1e-8),
+                        -cfg.rnd_obs_clip, cfg.rnd_obs_clip,
+                    )
+                    rnd_obs = torch.as_tensor(fn, dtype=torch.float32, device=device)
                 with torch.no_grad():
                     nov = rnd_model.novelty(
-                        torch.as_tensor(fn, dtype=torch.float32, device=device),
+                        rnd_obs,
                         torch.as_tensor(prog_np, device=device),
                     ).cpu().numpy()
                 # Battle-mask: battle RNG is unlearnable noisy-TV; pay no
                 # curiosity for landing in / sitting through a battle.
                 nov[inbatt > 0] = 0.0
                 buf.rewards_int[step] = torch.as_tensor(nov, dtype=torch.float32, device=device)
-                buf.rnd_frame[step] = torch.as_tensor(landed, dtype=torch.uint8, device=device)
+                if ram_mode:
+                    buf.rnd_state[step] = torch.as_tensor(state_np, dtype=torch.float32, device=device)
+                else:
+                    buf.rnd_frame[step] = torch.as_tensor(landed, dtype=torch.uint8, device=device)
                 buf.rnd_progress[step] = torch.as_tensor(prog_np, device=device)
+
+        # Rollout = env-collection half (forward + envs.step + RND novelty). The
+        # remainder of the iter is the update half (GAE + n_epochs of SGD). The
+        # split tells us which half the CPU bottleneck lives in: rollout-bound =>
+        # attack env coordination (n_envs / fork / frame_skip); update-bound =>
+        # attack torch_threads / minibatch.
+        rollout_dt = time.perf_counter() - rollout_t0
 
         with torch.no_grad():
             _, last_values_t, last_values_int_t = net(obs_t)
@@ -586,11 +672,14 @@ def train(
         if cfg.rnd_enabled:
             b_adv_int = buf.advantages_int.reshape(batch_size_local)
             b_ret_int = buf.returns_int.reshape(batch_size_local)
-            fh, fw = obs_shape[-2], obs_shape[-1]
-            b_rnd_frame = buf.rnd_frame.reshape((batch_size_local, 1, fh, fw))
             b_rnd_prog = buf.rnd_progress.reshape((batch_size_local, progress_dim))
-            obs_mean_t = torch.as_tensor(obs_rms.mean, dtype=torch.float32, device=device)
-            obs_std_t = torch.as_tensor(obs_rms.std, dtype=torch.float32, device=device)
+            if cfg.rnd_input == "ram":
+                b_rnd_state = buf.rnd_state.reshape((batch_size_local, buf.rnd_state.shape[-1]))
+            else:
+                fh, fw = obs_shape[-2], obs_shape[-1]
+                b_rnd_frame = buf.rnd_frame.reshape((batch_size_local, 1, fh, fw))
+                obs_mean_t = torch.as_tensor(obs_rms.mean, dtype=torch.float32, device=device)
+                obs_std_t = torch.as_tensor(obs_rms.std, dtype=torch.float32, device=device)
 
         # Raw per-stream advantage scales (pre per-minibatch normalization). The
         # gap shows what ext_coef:int_coef is really weighting against.
@@ -626,9 +715,9 @@ def train(
                     # runs) while ext_coef:int_coef stays the true ratio of pull.
                     # Without this, two unit-std streams at 2:1 give std
                     # ~sqrt(5)=2.24 — a silent ~2.2x policy-step inflation.
-                    coef_norm = (cfg.ext_coef ** 2 + cfg.int_coef ** 2) ** 0.5
+                    coef_norm = (cfg.ext_coef ** 2 + int_coef_now ** 2) ** 0.5
                     mb_adv = (cfg.ext_coef * a_ext
-                              + cfg.int_coef * a_int) / (coef_norm + 1e-8)
+                              + int_coef_now * a_int) / (coef_norm + 1e-8)
                 else:
                     mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
@@ -656,12 +745,16 @@ def train(
                     value_loss = value_loss + v_int_loss
                     last_v_int_loss = float(v_int_loss.item())
                     # Train the predictor on a random subset (update_proportion)
-                    # of the minibatch's landed frames (normalized as in rollout).
-                    fr = b_rnd_frame[mb_idx].float()
-                    fr = ((fr - obs_mean_t) / (obs_std_t + 1e-8)).clamp(
-                        -cfg.rnd_obs_clip, cfg.rnd_obs_clip
-                    )
-                    nov_train = rnd_model.novelty(fr, b_rnd_prog[mb_idx])
+                    # of the minibatch's landed observations (normalized as in
+                    # rollout for frame mode; raw state vector for ram mode).
+                    if cfg.rnd_input == "ram":
+                        rnd_obs_mb = b_rnd_state[mb_idx]
+                    else:
+                        fr = b_rnd_frame[mb_idx].float()
+                        rnd_obs_mb = ((fr - obs_mean_t) / (obs_std_t + 1e-8)).clamp(
+                            -cfg.rnd_obs_clip, cfg.rnd_obs_clip
+                        )
+                    nov_train = rnd_model.novelty(rnd_obs_mb, b_rnd_prog[mb_idx])
                     keep = (torch.rand(nov_train.shape[0], device=device)
                             < cfg.rnd_update_proportion).float()
                     rnd_loss = (nov_train * keep).sum() / (keep.sum() + 1e-8)
@@ -724,6 +817,7 @@ def train(
                 f"pg_loss {last_pg_loss:+.4f}  "
                 f"v_loss {last_v_loss:.4f}  "
                 f"H {last_entropy:.3f}  "
+                f"roll {rollout_dt:.1f}s  upd {iter_dt - rollout_dt:.1f}s  "
                 f"dt {iter_dt:.2f}s  "
                 f"sps {sps:.0f}"
             )
@@ -745,6 +839,8 @@ def train(
                 "adv_int_std": adv_int_std,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "iter_seconds": iter_dt,
+                "rollout_seconds": rollout_dt,
+                "update_seconds": iter_dt - rollout_dt,
                 "samples_per_second": sps,
             })
 

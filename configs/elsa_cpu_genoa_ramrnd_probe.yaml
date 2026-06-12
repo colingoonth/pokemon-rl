@@ -1,0 +1,50 @@
+# Day-11 DIAGNOSTIC PROBE for RAM-feature RND (see elsa_cpu_genoa_ramrnd_h32k).
+# Short run (30M steps, ~7h on Genoa) to confirm the new exploration mechanism
+# works BEFORE committing the full 100M. The signals to watch (readable early,
+# ~iter 500-1000 / ~1h):
+#   - rnd_loss / nov_raw should DECAY (vs frame-RND's flat 40M-step line) ->
+#     the predictor is converging and novelty is informative.
+#   - tiles/maps should climb past the ~282-tiles/env frame-RND plateau.
+#   - watch a checkpoint: agent should move through maps, not loiter on
+#     animated water/flower tiles, and re-traverse after a story-flag flip.
+#
+# NOTE on entropy: deliberately kept at the intended 0.01, NOT the usual 0.005
+# low-entropy probe. The standard low-entropy probe surfaces degenerate REWARD-
+# landscape equilibria; this change is to the exploration MECHANISM (RND), and
+# suppressing exploration would defeat the very thing under test. The reward
+# class (RewardV0_5_skeleton) is unchanged from the running baseline.
+run_name: elsa_genoa_ramrnd_probe
+state_path: states/blue_fight.state
+total_timesteps: 30_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_skeleton
+
+# --- RND / curiosity (RAM-feature mode) ---
+rnd_enabled: true
+rnd_input: ram
+rnd_num_maps: 256
+rnd_n_fourier: 128
+rnd_fourier_scale: 16.0
+ext_coef: 2.0
+int_coef: 1.0
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_int_clip: 5.0

@@ -6,7 +6,7 @@
 #SBATCH --constraint=genoa
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=176
+#SBATCH --cpus-per-task=190
 #SBATCH --mem=200G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=/scratch/guenthc1/pokemon-rl/runs/%x_%j.out

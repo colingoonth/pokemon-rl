@@ -38,6 +38,54 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "configs" / "dev_local.yaml"
 
 
+def _snapshot_run(run_dir: Path, cfg, config_src: Path) -> None:
+    """Make a run self-describing: write the RESOLVED config, git state, and
+    metadata into the run dir at launch (main rank only). Without this a run
+    dir is just {metrics.csv, checkpoints/} with no record of what produced it
+    — and an uncommitted local edit is exactly how a run becomes unreproducible,
+    so the git dirty flag is load-bearing for this edit-config / push / pull /
+    sbatch workflow."""
+    import json
+    import socket
+    import subprocess
+    from dataclasses import asdict
+    from datetime import datetime
+
+    import yaml
+
+    (run_dir / "config_resolved.yaml").write_text(
+        yaml.safe_dump(asdict(cfg), sort_keys=False)
+    )
+
+    def _git(*a: str) -> str:
+        try:
+            return subprocess.check_output(
+                ["git", *a], cwd=str(ROOT), text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except Exception:
+            return ""
+
+    commit = _git("rev-parse", "HEAD")
+    dirty = bool(_git("status", "--porcelain"))
+    (run_dir / "git.txt").write_text(f"commit {commit}\ndirty {dirty}\n")
+    meta = {
+        "run_name": run_dir.name,
+        "config_src": str(config_src),
+        "commit": commit,
+        "dirty": dirty,
+        "seed": cfg.seed,
+        "reward_class": cfg.reward_class,
+        "total_timesteps": cfg.total_timesteps,
+        "n_envs": cfg.n_envs,
+        "torch_threads": cfg.torch_threads,
+        "device": cfg.device,
+        "hostname": socket.gethostname(),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+        "launched_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -48,6 +96,10 @@ def parse_args() -> argparse.Namespace:
                         "before training begins. Useful when continuing an "
                         "earlier run; harmful when the earlier run learned "
                         "a degenerate policy you want to discard.")
+    p.add_argument("--force", action="store_true",
+                   help="Overwrite an existing non-empty run dir. Without this "
+                        "(and without --resume) a collision with a run that has "
+                        "checkpoints/metrics aborts, to prevent clobbering work.")
     return p.parse_args()
 
 
@@ -69,8 +121,23 @@ def main() -> None:
     cfg, run_name = load_ppo_config(args.config, device=device)
     run_dir = out_root / run_name
     if dctx.is_main:
+        # Clobber guard: refuse to write into a dir that already holds a run
+        # unless we're resuming it or explicitly forcing. A silent reuse cost a
+        # run dir once (Day 10). --resume continues it; --force overwrites.
+        ckpt_dir = run_dir / "checkpoints"
+        has_run = run_dir.exists() and (
+            (run_dir / "metrics.csv").exists()
+            or (ckpt_dir.exists() and next(ckpt_dir.glob("iter_*.pt"), None) is not None)
+        )
+        if has_run and args.resume is None and not args.force:
+            raise SystemExit(
+                f"run dir already exists with data: {run_dir}\n"
+                f"  pass --resume <ckpt> to continue it, --force to overwrite, "
+                f"or choose a new run_name in the config."
+            )
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg.log_csv = str(run_dir / "metrics.csv")
+        _snapshot_run(run_dir, cfg, args.config)
     else:
         # Non-main ranks must NOT write CSV/checkpoints. ppo.train() already
         # guards on dctx.is_main but blanking the path defensively avoids
@@ -116,6 +183,7 @@ def main() -> None:
             async_envs=cfg.async_envs,
             reward_cls=reward_cls,
             frame_skip=cfg.frame_skip,
+            context=cfg.vec_context,
         )
 
     try:

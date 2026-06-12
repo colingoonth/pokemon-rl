@@ -1,0 +1,48 @@
+# V0.5 RND (RAM-feature variant) — Genoa CPU run (ELSA node001-010, EPYC Genoa).
+# Day 11: novelty keyed on RAM state (map_id, x, y) + the 4 Oak-story progress
+# bits, REPLACING frame-RND. Motivation (from the Day-10 head-to-head + watch
+# session): frame-RND's novelty/rnd_loss stayed flat across 40M steps and the
+# policy loitered in animated overworld tiles (water/flowers = noisy-TV) instead
+# of moving through the story. RAM-state novelty is animation-invariant (same
+# tile = same input regardless of shimmer), so loitering self-limits as the
+# predictor learns the tile; and a story-flag flip (got_parcel -> got_pokedex ->
+# got_pokeballs) refreshes novelty across the whole explored map, giving the
+# forced Oak backtrack real intrinsic pull — which frame-RND could not.
+#
+# Identical to elsa_cpu_genoa_h32k EXCEPT the RND input mode + ram params.
+run_name: elsa_genoa_ramrnd_h32k
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_skeleton
+
+# --- RND / curiosity (RAM-feature mode) ---
+rnd_enabled: true
+rnd_input: ram               # map_id/x/y + progress, animation-invariant (vs "frame")
+rnd_num_maps: 256            # map_id embedding-table size
+rnd_n_fourier: 128           # random Fourier features for (x,y)
+rnd_fourier_scale: 16.0      # spatial-granularity knob (higher = sharper per-tile novelty)
+ext_coef: 2.0
+int_coef: 1.0
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+# rnd_obs_norm_steps / rnd_obs_clip are frame-only (ignored in ram mode).
+rnd_int_clip: 5.0

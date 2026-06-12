@@ -11,7 +11,7 @@ state_path: states/blue_fight.state
 total_timesteps: 100_000_000
 n_envs: 144
 max_steps: 32768
-n_steps: 256
+n_steps: 64
 n_epochs: 4
 minibatch_size: 192
 learning_rate: 2.5e-4
@@ -23,8 +23,15 @@ entropy_coef: 0.01
 max_grad_norm: 0.5
 anneal_lr: true
 seed: 0
-log_every: 5
+log_every: 2
+save_every: 25
 async_envs: true
+# Day-10 throughput fix: multi-thread the PPO update (the ~80% bottleneck). The
+# Genoa threads sweep peaks at a plateau across 32-64 threads (~730 sps, 3.2x the
+# single-thread 228); 48 sits in the sweet spot with margin from the 96-thread
+# memory-bandwidth cliff. Env workers stay single-threaded (OMP_NUM_THREADS=1 in
+# the sbatch, set before they spawn); this bumps only the main learner process.
+torch_threads: 48
 reward_class: RewardV0_5_skeleton
 
 # --- RND / curiosity ---

@@ -1,0 +1,66 @@
+# Day-11 DIAGNOSTIC PROBE for the V0.5.1 story-multiplier ladder.
+# Builds on the RAM-feature RND probe (elsa_cpu_genoa_ramrnd_probe), which broke
+# the exploration plateau (tiles/env 1 -> 661) but earned its ENTIRE return from
+# combat and ZERO from story — it covered the map without playing the game.
+#
+# This probe tests the new REWARD LANDSCAPE: RewardV0_5_2_storyladder. A story
+# multiplier M(stage) scales the combat/level/heal signal, plus a one-shot bonus
+# at each verified, monotone, on-path rung (Pokeballs -> Route1 -> PotionSample
+# -> Viridian -> Mart -> Parcel -> POKEDEX[opens the Viridian north gate] ->
+# Route2 -> Forest, ... -> Brock). M ~2.85x at the forest, ~4.35x at Brock.
+#
+# entropy_coef: 0.005 — this is the standard LOW-entropy probe (per CLAUDE.md
+# discipline rule 2). Unlike the RAM-RND probe (which deliberately used 0.01 to
+# avoid suppressing the exploration mechanism under test), here the REWARD
+# LANDSCAPE is what's under test, so we WANT degenerate equilibria to surface
+# fast — e.g. does the multiplier-on-combat create a "grind combat at low stage"
+# attractor instead of pushing through the Pokedex gate? RND still drives
+# exploration via the intrinsic advantage independent of policy entropy.
+#
+# anneal_int_coef: true — exercises the curiosity->story handoff (int_coef
+# 1.0 -> 0.1 over training) alongside the new landscape.
+#
+# Signals to watch (watch a checkpoint + the reward attribution):
+#   - RUNG_* fires in the attribution breakdown (esp. RUNG_PARCEL, RUNG_POKEDEX)
+#     — frame/RAM-RND probes fired ZERO story rewards; any RUNG_POKEDEX means it
+#     completed the forced backtrack and the north gate is open.
+#   - STORY_MULT climbs above 0 (multiplier engaged).
+#   - reaches map 0x32 (Viridian Forest south gate) — the frontier goal it has
+#     NEVER reached. Degenerate outcome = loiters grinding combat, M stuck low.
+run_name: elsa_genoa_storyladder_v2_probe
+state_path: states/blue_fight.state
+total_timesteps: 30_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_2_storyladder
+
+# --- RND / curiosity (RAM-feature mode, carries the flag deserts) ---
+rnd_enabled: true
+rnd_input: ram
+rnd_num_maps: 256
+rnd_n_fourier: 128
+rnd_fourier_scale: 16.0
+ext_coef: 2.0
+int_coef: 1.0
+anneal_int_coef: true     # curiosity bootstrap -> story-signal handoff
+int_coef_final: 0.1       # keep a small exploration floor (don't fully collapse)
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_int_clip: 5.0

@@ -48,6 +48,7 @@ def make_vec_env(
     reward_cls: Callable[[], Reward] = RewardV0_1,
     async_envs: bool = False,
     frame_skip: int = 1,
+    context: str = "spawn",
 ) -> VectorEnv:
     """Construct a vectorized env with `n_envs` parallel PokemonRed instances.
 
@@ -86,5 +87,7 @@ def make_vec_env(
         # Required when the parent has an initialized CUDA context (DDP ranks),
         # because fork-after-CUDA-init raises "Cannot re-initialize CUDA in
         # forked subprocess." Safe in single-process mode too.
-        return AsyncVectorEnv(env_fns, context="spawn", autoreset_mode=AutoresetMode.SAME_STEP)
+        # context="fork" is cheaper (no fresh-interpreter import storm, lighter
+        # IPC) and safe on the GPU-less CPU nodes where there is no CUDA context.
+        return AsyncVectorEnv(env_fns, context=context, autoreset_mode=AutoresetMode.SAME_STEP)
     return SyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.SAME_STEP)

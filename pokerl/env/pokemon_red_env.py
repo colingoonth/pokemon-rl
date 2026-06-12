@@ -169,10 +169,16 @@ class PokemonRedEnv(gym.Env):
             pokeballs) that pixels can't show, so curiosity is context-aware.
           - 'in_battle': battle flag so the PPO loop can zero intrinsic reward
             during battles (their RNG is unlearnable noisy-TV).
+          - 'rnd_state': [map_id, x, y] for the animation-invariant "ram" RND
+            mode. Same tile = same vector regardless of water/flower animation,
+            so novelty can't be farmed by loitering; fused with 'progress' in
+            the encoder so a story-flag flip refreshes novelty across the map.
         Threading these through info (rather than a Dict obs space) keeps
         FrameStack + AsyncVectorEnv untouched."""
         mem = self.pyboy.memory
+        x, y = rm.player_position(mem)
         return {
             "progress": np.asarray(rm.progress_bits(mem), dtype=np.float32),
             "in_battle": int(rm.in_battle(mem)),
+            "rnd_state": np.asarray([rm.map_id(mem), x, y], dtype=np.float32),
         }

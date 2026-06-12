@@ -767,3 +767,222 @@ def test_v05_beat_brock_gate_pays_fifty():
     r.reset(FakeMem(base_state()))
     r.compute(_mem_with_byte(0xD755, 1 << 7))
     assert r.last_components.get("GATE_BEAT_BROCK") == 50.0
+
+
+# --- V0.5.1 story-multiplier ladder ---
+
+def test_storyladder_registered_and_constructs():
+    from pokerl.env.rewards import get_reward_cls, RewardV0_5_1_storyladder
+    assert get_reward_cls("RewardV0_5_1_storyladder") is RewardV0_5_1_storyladder
+
+
+def test_storyladder_starts_at_unit_multiplier():
+    from pokerl.env.rewards import RewardV0_5_1_storyladder
+    r = RewardV0_5_1_storyladder()
+    r.reset(FakeMem(base_state(map_id=0x00)))   # Pallet, nothing achieved
+    assert r._mult == 1.0
+    assert r._fired == set()
+
+
+def test_storyladder_map_rung_fires_once_and_raises_mult():
+    from pokerl.env.rewards import RewardV0_5_1_storyladder
+    r = RewardV0_5_1_storyladder()
+    r.reset(FakeMem(base_state(map_id=0x00)))
+    mem = FakeMem(base_state(map_id=0x0C))      # entered Route 1
+    r.compute(mem)
+    assert r.last_components.get("RUNG_ROUTE_1") == 4.0
+    assert abs(r._mult - 1.10) < 1e-9
+    # revisit the same map -> no double-pay, multiplier unchanged
+    r.compute(mem)
+    assert "RUNG_ROUTE_1" not in r.last_components
+    assert abs(r._mult - 1.10) < 1e-9
+
+
+def test_storyladder_pokedex_flag_rung_is_the_keystone():
+    from pokerl.env.rewards import RewardV0_5_1_storyladder
+    r = RewardV0_5_1_storyladder()
+    r.reset(FakeMem(base_state(map_id=0x00)))
+    r.compute(_mem_with_byte(0xD74B, 1 << 5))   # got Pokedex (the north-gate key)
+    assert r.last_components.get("RUNG_POKEDEX") == 30.0
+    assert abs(r._mult - 1.50) < 1e-9
+
+
+def test_storyladder_premasks_progress_at_reset():
+    from pokerl.env.rewards import RewardV0_5_1_storyladder
+    r = RewardV0_5_1_storyladder()
+    # warm-start already holding the parcel, on a neutral (non-ladder) map so
+    # only the PARCEL rung pre-masks: multiplier seeded, no one-shot payout.
+    s = base_state(map_id=0x70)         # 0x70 is not a ladder map
+    s[0xD74E] = 1 << 1                   # parcel obtained
+    r.reset(FakeMem(s))
+    assert "PARCEL" in r._fired
+    assert abs(r._mult - 1.20) < 1e-9
+    r.compute(FakeMem(s))
+    assert "RUNG_PARCEL" not in r.last_components
+
+
+def test_storyladder_backtrack_staircase():
+    """The parcel->Oak return leg lights up progress-conditioned rungs that
+    plain first-entry map rungs miss (the maps were already visited outbound)."""
+    from pokerl.env.rewards import RewardV0_5_1_storyladder
+    r = RewardV0_5_1_storyladder()
+    r.reset(FakeMem(base_state(map_id=0x70)))   # neutral start, nothing fired
+
+    def mem(map_id):
+        s = base_state(map_id=map_id)
+        s[0xD74E] = 1 << 1                       # carrying the parcel
+        return FakeMem(s)
+
+    r.compute(mem(0x0C))                          # back on Route 1 with the parcel
+    assert r.last_components.get("RUNG_RETURN_ROUTE_1") == 6.0
+    r.compute(mem(0x00))                          # into Pallet with the parcel
+    assert r.last_components.get("RUNG_RETURN_PALLET") == 8.0
+    r.compute(mem(0x28))                          # at Oak's Lab, the delivery point
+    assert r.last_components.get("RUNG_AT_OAK_PARCEL") == 12.0
+    assert {"RETURN_ROUTE_1", "RETURN_PALLET", "AT_OAK_PARCEL"} <= r._fired
+
+
+# --- V0.5.2 potential-based danger-zone HP (replaces farmable quadratic heal) ---
+
+def _hp_state(cur: int, mx: int, **kw) -> "FakeMem":
+    """base_state with one party mon at cur/mx HP (u16 big-endian fields)."""
+    s = base_state(party_count=1, **kw)
+    base = rm.ADDR_PARTY_MON_BASE
+    s[base + rm.PMON_OFFSET_HP_CURRENT] = (cur >> 8) & 0xFF
+    s[base + rm.PMON_OFFSET_HP_CURRENT + 1] = cur & 0xFF
+    s[base + rm.PMON_OFFSET_HP_MAX] = (mx >> 8) & 0xFF
+    s[base + rm.PMON_OFFSET_HP_MAX + 1] = mx & 0xFF
+    return FakeMem(s)
+
+
+def test_v52_quadratic_heal_damage_disabled():
+    from pokerl.env.rewards import RewardV0_5_2_storyladder
+    assert RewardV0_5_2_storyladder.HEAL_QUAD_COEF == 0.0
+    assert RewardV0_5_2_storyladder.DAMAGE_QUAD_COEF == 0.0
+
+
+def test_v52_no_hp_penalty_when_healthy():
+    """Above the 50% danger threshold the HP term is flat -> a won fight that
+    ends healthy costs nothing (the anti-timidity property)."""
+    from pokerl.env.rewards import RewardV0_5_2_storyladder
+    r = RewardV0_5_2_storyladder()
+    r.reset(_hp_state(100, 100))          # full HP
+    r.compute(_hp_state(70, 100))         # took damage but still > 50%
+    assert "HP_DANGER" not in r.last_components
+
+
+def test_v52_danger_zone_debt_and_potential_round_trip():
+    """Dropping into the danger zone costs phi; healing back repays it exactly
+    (potential telescopes -> hurt->heal nets ~0, so no farm)."""
+    from pokerl.env.rewards import RewardV0_5_2_storyladder
+    r = RewardV0_5_2_storyladder()
+    r.reset(_hp_state(100, 100))
+    r.compute(_hp_state(20, 100))         # 1.0 -> 0.2: phi(0.2)-phi(1.0) = -8*0.3^2
+    debt = r.last_components["HP_DANGER"]
+    assert abs(debt - (-0.72)) < 1e-6
+    r.compute(_hp_state(100, 100))        # 0.2 -> 1.0: repays +0.72
+    repay = r.last_components["HP_DANGER"]
+    assert abs(repay - 0.72) < 1e-6
+    assert abs(debt + repay) < 1e-9       # round trip nets zero -> unfarmable
+
+
+def test_v52_respawn_jump_is_skipped():
+    """The faint->respawn HP jump (prev == 0 -> full) must not pay a heal
+    repayment, or fainting could be partially refunded."""
+    from pokerl.env.rewards import RewardV0_5_2_storyladder
+    r = RewardV0_5_2_storyladder()
+    r.reset(_hp_state(100, 100))
+    r.compute(_hp_state(0, 100))          # fainted: prev 1.0 -> now 0.0
+    r.compute(_hp_state(100, 100))        # respawn: prev 0.0 -> now 1.0, must skip
+    assert "HP_DANGER" not in r.last_components
+
+
+# --- V0.5.3: rival-win bonus + escalating battle-stall ---
+
+def _battle_mem(party_cur=50, party_mx=50, enemy_hp=20, **kw) -> "FakeMem":
+    """In-battle (trainer) FakeMem with fixed party + enemy HP for stall tests."""
+    s = base_state(party_count=1, **kw)
+    base = rm.ADDR_PARTY_MON_BASE
+    s[base + rm.PMON_OFFSET_HP_CURRENT] = (party_cur >> 8) & 0xFF
+    s[base + rm.PMON_OFFSET_HP_CURRENT + 1] = party_cur & 0xFF
+    s[base + rm.PMON_OFFSET_HP_MAX] = (party_mx >> 8) & 0xFF
+    s[base + rm.PMON_OFFSET_HP_MAX + 1] = party_mx & 0xFF
+    s[rm.ADDR_IN_BATTLE] = 2               # trainer battle
+    s[rm.ADDR_ENEMY_MON_HP] = (enemy_hp >> 8) & 0xFF
+    s[rm.ADDR_ENEMY_MON_HP + 1] = enemy_hp & 0xFF
+    return FakeMem(s)
+
+
+def test_v53_rival_win_rung_is_first_and_fires():
+    from pokerl.env.rewards import RewardV0_5_3_storyladder
+    assert RewardV0_5_3_storyladder._LADDER[0][0] == "RIVAL_WIN"
+    r = RewardV0_5_3_storyladder()
+    r.reset(FakeMem(base_state(map_id=0x28)))   # Oak's lab, rival flag unset
+    r.compute(_mem_with_byte(0xD74B, 1 << 3))   # rival battle won -> flag bit 3
+    assert r.last_components.get("RUNG_RIVAL_WIN") == 25.0
+
+
+def test_v53_battle_stall_escalates_then_caps():
+    """Sustained stalling grows the per-step penalty (-0.01 -> -1.0) instead of
+    the flat -0.01, then caps at COEF*RAMP."""
+    from pokerl.env.rewards import RewardV0_5_3_storyladder
+    r = RewardV0_5_3_storyladder()
+    mem = _battle_mem()
+    r.reset(mem)
+    pens = []
+    for _ in range(200):                  # same mem each step -> no HP change -> stall climbs
+        r.compute(mem)
+        pens.append(r.last_components.get("BATTLE_STALL", 0.0))
+    nz = [p for p in pens if p != 0.0]
+    assert nz, "stall penalty never fired"
+    assert abs(nz[-1]) > abs(nz[0])                       # escalates
+    assert any(abs(p - (-1.0)) < 1e-9 for p in nz)        # reaches the cap -0.01*100
+    assert min(nz) >= -1.0 - 1e-9                          # never exceeds the cap
+
+
+def test_v53_base_class_keeps_flat_stall():
+    """RAMP defaults to 1 (flat) so existing classes are unchanged."""
+    from pokerl.env.rewards import RewardV0_4_2_center, RewardV0_5_3_storyladder
+    assert RewardV0_4_2_center.BATTLE_STALL_RAMP == 1
+    assert RewardV0_5_3_storyladder.BATTLE_STALL_RAMP == 100
+
+
+# --- V0.5.4: dense enemy-damage engagement reward ---
+
+def test_v54_enemy_damage_rewarded():
+    from pokerl.env.rewards import RewardV0_5_4_storyladder
+    r = RewardV0_5_4_storyladder()
+    r.reset(_battle_mem(enemy_hp=20))      # in trainer battle, enemy at 20 HP
+    r.compute(_battle_mem(enemy_hp=12))    # enemy took 8 damage
+    assert abs(r.last_components.get("ENEMY_DMG", 0.0) - 0.15 * 8) < 1e-9
+
+
+def test_v54_no_reward_for_enemy_hp_increase():
+    """A fresh enemy sent in (HP jumps up) must not pay damage reward."""
+    from pokerl.env.rewards import RewardV0_5_4_storyladder
+    r = RewardV0_5_4_storyladder()
+    r.reset(_battle_mem(enemy_hp=5))
+    r.compute(_battle_mem(enemy_hp=18))    # HP up -> negative delta -> no reward
+    assert "ENEMY_DMG" not in r.last_components
+
+
+def test_v54_stall_ramp_reverted_to_flat():
+    from pokerl.env.rewards import RewardV0_5_4_storyladder
+    assert RewardV0_5_4_storyladder.BATTLE_STALL_RAMP == 1
+    assert RewardV0_5_4_storyladder._LADDER[0][0] == "RIVAL_WIN"   # still inherits the capstone
+
+
+def test_storyladder_multiplier_scales_combat_base():
+    """STORY_MULT contributes (M-1)*base so the breakdown sums to M*base, i.e.
+    combat is literally worth more once the story has progressed."""
+    from pokerl.env.rewards import RewardV0_5_1_storyladder
+    r = RewardV0_5_1_storyladder()
+    r.reset(FakeMem(base_state(map_id=0x00, level=6)))
+    r.compute(_mem_with_byte(0xD74B, 1 << 5))            # fire Pokedex -> M = 1.5
+    # a level-up step yields a positive combat base and fires no new rung
+    total = r.compute(FakeMem(base_state(map_id=0x00, level=8)))
+    base = sum(v for k, v in r.last_components.items()
+               if k != "STORY_MULT" and not k.startswith("RUNG_"))
+    assert base != 0.0                                   # the test is meaningful
+    assert abs(r.last_components.get("STORY_MULT", 0.0) - 0.5 * base) < 1e-9
+    assert abs(total - 1.5 * base) < 1e-9                # no new rung this step
