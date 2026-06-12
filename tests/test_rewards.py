@@ -986,3 +986,76 @@ def test_storyladder_multiplier_scales_combat_base():
     assert base != 0.0                                   # the test is meaningful
     assert abs(r.last_components.get("STORY_MULT", 0.0) - 0.5 * base) < 1e-9
     assert abs(total - 1.5 * base) < 1e-9                # no new rung this step
+
+
+# ---------------------------------------------------------------------------
+# V0.5.5 corridor-stabilizing fix: per-area ENEMY_DMG diminishing + coupled
+# flee relief. Both driven by one shared per-area engagement budget.
+# ---------------------------------------------------------------------------
+from pokerl.env.rewards import RewardV0_5_5_storyladder
+
+
+def test_v0_5_5_enemy_dmg_diminishes_per_area():
+    """ENEMY_DMG pays full coef in a fresh area, decays linearly to 0 as the
+    area's budget fills, and resets when the agent enters a NEW map."""
+    r = RewardV0_5_5_storyladder()
+    B = r.ENEMY_DMG_BUDGET_PER_AREA            # 100.0
+    C = r.ENEMY_DMG_COEF                        # 0.15
+    mem = FakeMem(base_state(map_id=0x12))     # Route 1
+    r.reset(mem)
+
+    # Fresh area (spent=0): full coefficient.
+    assert abs(r._enemy_dmg_amount(40.0, mem) - C * 40.0 * 1.0) < 1e-9
+    # spent=40, next hit's remaining fraction = 1 - 40/100 = 0.6
+    assert abs(r._enemy_dmg_amount(40.0, mem) - C * 40.0 * 0.6) < 1e-9
+    # spent=80 -> 100: budget saturated, further grinding in this area pays 0.
+    r._enemy_dmg_amount(40.0, mem)             # spent now 120 (>= B)
+    assert r._enemy_dmg_amount(40.0, mem) == 0.0
+
+    # A DIFFERENT map is fresh again -> full coefficient.
+    mem2 = FakeMem(base_state(map_id=0x13))    # Viridian
+    assert abs(r._enemy_dmg_amount(40.0, mem2) - C * 40.0 * 1.0) < 1e-9
+
+
+def _enter_wild_battle(state, enemy_hp):
+    state[rm.ADDR_IN_BATTLE] = 1               # 1 = wild
+    state[rm.ADDR_ENEMY_MON_SPECIES] = 16
+    state[rm.ADDR_ENEMY_MON_HP] = enemy_hp >> 8
+    state[rm.ADDR_ENEMY_MON_HP + 1] = enemy_hp & 0xFF
+
+
+def test_v0_5_5_flee_penalized_in_fresh_area():
+    """In an un-engaged area the flee penalty still fires — fighting is
+    incentivized before the agent has cleared the area."""
+    state = base_state(map_id=0x12)
+    _set_party_hp(state, 0, 20, 22)
+    mem = FakeMem(state)
+    r = RewardV0_5_5_storyladder()
+    r.reset(mem)
+
+    _enter_wild_battle(state, 30)
+    r.compute(mem)                             # enter battle, no damage dealt
+    state[rm.ADDR_IN_BATTLE] = 0               # flee (enemy alive, party alive)
+    r.compute(mem)
+
+    assert r.last_components.get("FLEE_PENALTY", 0.0) < 0.0
+
+
+def test_v0_5_5_flee_free_after_area_cleared():
+    """Once the area's engagement budget is spent, fleeing its wild encounters
+    is refunded (free) so the agent can traverse instead of being trapped."""
+    state = base_state(map_id=0x12)
+    _set_party_hp(state, 0, 20, 22)
+    mem = FakeMem(state)
+    r = RewardV0_5_5_storyladder()
+    r.reset(mem)
+
+    _enter_wild_battle(state, 150)
+    r.compute(mem)                             # enter battle, enemy HP 150
+    state[rm.ADDR_ENEMY_MON_HP + 1] = 49       # deal 101 dmg, enemy still alive
+    r.compute(mem)
+    assert r._enemy_dmg_per_area.get(0x12, 0.0) >= r.ENEMY_DMG_BUDGET_PER_AREA
+
+    state[rm.ADDR_IN_BATTLE] = 0               # flee from the cleared area
+    r.compute(mem)
+    assert "FLEE_PENALTY" not in r.last_components      # refunded

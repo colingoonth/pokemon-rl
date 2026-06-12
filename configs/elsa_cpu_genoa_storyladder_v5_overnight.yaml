@@ -1,0 +1,67 @@
+# OVERNIGHT run for V0.5.5 — corridor-stabilized story-multiplier ladder.
+#
+# Follows the v0.5.4 probe (job 23438), which REACHED Oak's Parcel (5 rungs,
+# M=1.65x) but could not HOLD progress: the policy oscillated between a GRIND
+# attractor (uncapped per-area ENEMY_DMG, amplified by the multiplier) and a
+# FLEE-LOOP (every grass-traversal flee taxed by FLEE_PENALTY), never retaining
+# anything past Route 1 once entropy annealed.
+#
+# RewardV0_5_5_storyladder fixes the LANDSCAPE (not constants): a single per-area
+# engagement budget makes ENEMY_DMG diminish as you grind one area (fresh
+# territory pays full) AND makes fleeing free once an area's budget is spent.
+# Optimal policy becomes "fight through a fresh area, then traverse" — the
+# corridor the v0.5.4 oscillation kept falling off. See rewards.py for the full
+# rationale.
+#
+# NOT a low-entropy diagnostic probe. The v0.5.4 probe already did the
+# diagnosis; this is the committed exploratory run, deliberately tuned for
+# breadth so the policy explores the corridor instead of snapping to an
+# attractor on anneal:
+#   - total_timesteps 100M (vs probe 30M) — long overnight budget, room to find
+#     AND hold the Pokedex backtrack + push toward the forest.
+#   - entropy_coef 0.02 (vs probe 0.005, 4x) — "try more stuff": keep the policy
+#     diverse so it doesn't commit early to grind/flee. Tune down if it never
+#     commits, up if it stays too noisy.
+#
+# Signals to watch (per the pokerl check-in convention):
+#   - RUNG_POKEDEX fires (solved the forced Pallet backtrack, opens north gate)
+#     and STAYS fired across checkpoints — the v0.5.4 failure was non-retention.
+#   - ENEMY_DMG per-area saturation visible: grinding stops paying, rungs climb.
+#   - reaches map 0x32 (Viridian Forest south gate) — never-reached frontier.
+run_name: elsa_genoa_storyladder_v5_overnight
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.02
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_5_storyladder
+
+# --- RND / curiosity (RAM-feature mode, carries the flag deserts) ---
+rnd_enabled: true
+rnd_input: ram
+rnd_num_maps: 256
+rnd_n_fourier: 128
+rnd_fourier_scale: 16.0
+ext_coef: 2.0
+int_coef: 1.0
+anneal_int_coef: true     # curiosity bootstrap -> story-signal handoff
+int_coef_final: 0.1       # keep a small exploration floor (don't fully collapse)
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_int_clip: 5.0

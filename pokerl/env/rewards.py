@@ -1711,7 +1711,87 @@ class RewardV0_5_4_storyladder(RewardV0_5_3_storyladder):
         if rm.in_battle(mem) != 0 and prev_in_battle != 0:
             dmg = prev_enemy_hp - rm.enemy_mon_hp(mem)
             if dmg > 0:
-                reward += self._track("ENEMY_DMG", self.ENEMY_DMG_COEF * dmg)
+                reward += self._track("ENEMY_DMG", self._enemy_dmg_amount(dmg, mem))
+        return reward
+
+    def _enemy_dmg_amount(self, dmg: float, mem) -> float:
+        """Engagement reward for `dmg` enemy HP knocked off this step. V0.5.4 is
+        flat linear (granularity-invariant, bounded per battle by enemy HP).
+        Subclasses override to reshape it — V0.5.5 makes it per-area diminishing
+        so grinding one area decays while fresh territory pays full."""
+        return self.ENEMY_DMG_COEF * dmg
+
+
+class RewardV0_5_5_storyladder(RewardV0_5_4_storyladder):
+    """V0.5.5: stabilize the progress corridor.
+
+    The v0.5.4 probe (job 23438) reached Oak's Parcel (5 rungs, M=1.65x) but
+    could NOT HOLD it — the policy oscillated violently between two attractors
+    and never retained progress past Route 1:
+      - GRIND: v0.5.4's ENEMY_DMG is flat linear and UNBOUNDED per area (unlike
+        BEAT_MON, which is capped 5/area). Amplified by the rising story
+        multiplier, farming wild battles in one area paid unboundedly, so the
+        policy kept stalling to grind instead of progressing.
+      - FLEE-LOOP: fleeing is the only way to cross grass (Gen-1 trainer battles
+        are unfleeable, so EVERY flee is a wild traversal-flee), yet FLEE_PENALTY
+        taxed each one. An agent trying to traverse got trapped racking up the
+        penalty (357 fires / -178 in one eval), the recurring flee-everything
+        mode documented back in V0.2.5-0.2.7.
+
+    The corridor between them — "fight through a fresh area, then move on" — was
+    too narrow to stay on, so on entropy anneal the policy fell into one
+    attractor or the other. Both failure modes share ONE root: nothing made
+    *forward* engagement worth more than *repeated* engagement in the same spot.
+
+    Fix (one coupled mechanism, per-area engagement budget):
+      A. ENEMY_DMG per-area DIMINISHING. Track cumulative damage dealt per map;
+         scale the reward by `max(0, 1 - spent/BUDGET)`. The first ~BUDGET HP of
+         damage in a FRESH area pays ~full engagement; grinding the same area
+         decays to zero; walking into a new area resets to full. Kills the grind
+         attractor — farming Route 1 stops paying, progressing to new territory
+         pays. Mirrors the proven BEAT_MON per-area decay, on continuous damage.
+      B. COUPLED flee relief. Once an area's engagement budget is spent (area
+         "cleared"), fleeing its wild encounters is FREE. Early in a fresh area
+         fighting is still incentivized (flee penalized, ENEMY_DMG full); once
+         you've engaged enough, the trap is removed and you traverse freely. One
+         shared per-area counter drives both A and B, so the optimal policy is
+         exactly "engage a new area, then walk through it" — the corridor.
+
+    No new exploit: after the budget is spent, ENEMY_DMG pays 0 AND flee pays 0,
+    so lingering earns nothing; the story multiplier's per-step pressure + the
+    unreached rungs pull the policy forward.
+
+    BUDGET = 100 HP ~= 5-8 early wild mons, matching BEAT_MON's 5-kill/area cap
+    in spirit. Tunable — the one science constant introduced here.
+    """
+
+    ENEMY_DMG_BUDGET_PER_AREA = 100.0   # HP of damage per map before engagement saturates
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        self._enemy_dmg_per_area: dict[int, float] = {}
+
+    def _enemy_dmg_amount(self, dmg: float, mem) -> float:
+        # Per-area diminishing: full coef while the area's budget is unspent,
+        # decaying linearly to 0 as cumulative damage there reaches BUDGET.
+        current_map = rm.map_id(mem)
+        spent = self._enemy_dmg_per_area.get(current_map, 0.0)
+        frac_remaining = max(0.0, 1.0 - spent / self.ENEMY_DMG_BUDGET_PER_AREA)
+        self._enemy_dmg_per_area[current_map] = spent + dmg
+        return self.ENEMY_DMG_COEF * dmg * frac_remaining
+
+    def compute(self, mem) -> float:
+        reward = super().compute(mem)
+        # Coupled flee relief: a flee fired this step iff super() tracked a
+        # FLEE_PENALTY (last_components is per-step). If the current area's
+        # engagement budget is already spent, the area is "cleared" — refund the
+        # penalty so traversal is free and the agent isn't trapped.
+        flee_pen = self.last_components.get("FLEE_PENALTY", 0.0)
+        if flee_pen < 0.0:
+            current_map = rm.map_id(mem)
+            if self._enemy_dmg_per_area.get(current_map, 0.0) >= self.ENEMY_DMG_BUDGET_PER_AREA:
+                reward -= flee_pen                       # flee_pen<0 → add it back
+                self.last_components.pop("FLEE_PENALTY", None)
         return reward
 
 
@@ -1782,6 +1862,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_5_2_storyladder": RewardV0_5_2_storyladder,
     "RewardV0_5_3_storyladder": RewardV0_5_3_storyladder,
     "RewardV0_5_4_storyladder": RewardV0_5_4_storyladder,
+    "RewardV0_5_5_storyladder": RewardV0_5_5_storyladder,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,
