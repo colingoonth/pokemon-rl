@@ -1,0 +1,61 @@
+# WARM-START run for V0.5.5 at lower entropy.
+#
+# The v5 overnight run (job 23458, entropy_coef 0.02) learned to win the rival
+# reliably but NEVER committed past it — 12h / 60M steps stuck at 1 rung with
+# entropy pinned at ~82%. The 0.02 coefficient (4x the probe) kept the policy
+# too diffuse to consolidate any forward strategy, so the V0.5.5 corridor fix
+# never even got exercised (ENEMY_DMG fired ~6x/rollout).
+#
+# This is a WEIGHTS-ONLY warm-start (ppo.py auto-detects a bare state_dict and
+# transfers policy weights only — fresh optimizer / RND / LR schedule / step
+# counter). We keep the rival-winning policy but restart training at FULL LR
+# with entropy_coef 0.01 (half of v5, double the probe) — the strongest setup
+# to make the under-committed policy actually consolidate and progress, so we
+# can finally test whether the corridor fix holds progress past Route 1.
+#
+# Seed file: runs/<this run>/checkpoints/iter_000000.pt = the bare `net` weights
+# extracted from the v5 iter_006475 checkpoint. Launched with --resume, which
+# finds that file and (being a bare state_dict) treats it as weights-only.
+#
+# Signals to watch (per the pokerl check-in convention):
+#   - entropy DROPS below ~50% within a few M steps (it commits, unlike v5).
+#   - rungs climb past RIVAL_WIN -> ROUTE_1 -> VIRIDIAN and STAY (retention was
+#     the v0.5.4 failure; commitment is the v5 failure).
+#   - ENEMY_DMG per-area saturation visible: grinding stops paying as rungs climb.
+run_name: elsa_genoa_storyladder_v5_1_warmstart
+state_path: states/blue_fight.state
+total_timesteps: 100_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_5_storyladder
+
+# --- RND / curiosity (RAM-feature mode, carries the flag deserts) ---
+rnd_enabled: true
+rnd_input: ram
+rnd_num_maps: 256
+rnd_n_fourier: 128
+rnd_fourier_scale: 16.0
+ext_coef: 2.0
+int_coef: 1.0
+anneal_int_coef: true
+int_coef_final: 0.1
+int_gamma: 0.99
+rnd_update_proportion: 0.25
+rnd_feature_dim: 256
+rnd_int_clip: 5.0
