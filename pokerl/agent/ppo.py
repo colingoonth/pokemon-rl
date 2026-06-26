@@ -475,11 +475,16 @@ def train(
         ckpt_dir = Path(cfg.log_csv).parent / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    def _build_ckpt(iteration: int) -> dict:
+    def _build_ckpt(iteration: int, stats: dict | None = None) -> dict:
         """Full checkpoint so a resume CONTINUES the run (weights + optimizer +
         curiosity + step/anneal) rather than re-randomizing. watch.py/rollout.py
         and the weights-only warm-start path read the "net" sub-key; bare legacy
-        state_dicts (no "net") still load too."""
+        state_dicts (no "net") still load too.
+
+        ``stats`` is the snapshot of training metrics (entropy, return, lr, ...)
+        AT THIS checkpoint, embedded so a single rsync'd .pt is self-describing —
+        lets us pick which entropy level to warm-start from later without
+        cross-referencing metrics.csv. Additive key; absent on legacy ckpts."""
         net_sd = net.module.state_dict() if dctx.is_distributed else net.state_dict()
         ckpt = {
             "net": net_sd,
@@ -487,6 +492,7 @@ def train(
             "global_step": global_step,
             "iteration": iteration,
             "total_timesteps": cfg.total_timesteps,
+            "stats": stats or {},
         }
         if cfg.rnd_enabled:
             # The frozen target net IS the novelty function — persist it, the
@@ -501,6 +507,23 @@ def train(
             }
             ckpt["rff"] = rff.rewems
         return ckpt
+
+    def _current_stats() -> dict:
+        """Snapshot of the latest logged training metrics, to embed in a
+        checkpoint. Closes over the loop locals; only call after the loop body
+        has assigned them at least once. RND-only fields are guarded."""
+        s = {
+            "global_step": global_step,
+            "mean_return_last20": mean_ret,
+            "entropy": last_entropy,
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            "episodes_completed": episode_count,
+            "unique_tiles_total": unique_tiles_total,
+        }
+        if cfg.rnd_enabled:
+            s["mean_int_reward"] = mean_int_reward
+            s["int_coef_now"] = int_coef_now
+        return s
 
     for iteration in range(resume_iteration + 1, n_iterations + 1):
         iter_t0 = time.perf_counter()
@@ -853,7 +876,7 @@ def train(
             iteration % cfg.save_every == 0 or iteration == n_iterations
         ):
             path = ckpt_dir / f"iter_{iteration:06d}.pt"
-            torch.save(_build_ckpt(iteration), path)
+            torch.save(_build_ckpt(iteration, _current_stats()), path)
             print(f"  -> saved checkpoint {path}")
 
     # Final checkpoint as a FULL dict so resuming from the canonical final.pt
@@ -861,7 +884,7 @@ def train(
     # warm-start. (run_dir is the metrics.csv parent.)
     if dctx.is_main and cfg.log_csv:
         final_path = Path(cfg.log_csv).parent / "final.pt"
-        torch.save(_build_ckpt(iteration), final_path)
+        torch.save(_build_ckpt(iteration, _current_stats()), final_path)
         print(f"Saved final checkpoint -> {final_path}")
 
     if csv_logger is not None:

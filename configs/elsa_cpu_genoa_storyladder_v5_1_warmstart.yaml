@@ -22,9 +22,24 @@
 #   - rungs climb past RIVAL_WIN -> ROUTE_1 -> VIRIDIAN and STAY (retention was
 #     the v0.5.4 failure; commitment is the v5 failure).
 #   - ENEMY_DMG per-area saturation visible: grinding stops paying as rungs climb.
+#
+# --- 2026-06-25 EXTENSION (resume to 500M) ---
+# The 100M warm-start completed but was cut off MID-COMMITMENT: entropy fell
+# 1.57 -> 0.73 (still descending) and tiles/rollout collapsed 150k -> 18k, yet
+# eval froze at 3/19 rungs (RIVAL_WIN -> ROUTE_1 -> VIRIDIAN, M=1.40). Watching
+# the policy: it circles / gets caught on flower tiles in Viridian, never
+# executes the Oak's-parcel backtrack. Diagnosis = exploration/under-training,
+# NOT a reward-landscape hole, so the fix is more compute (same reward class),
+# not a new variant. Resuming from iter_010850.pt (full ckpt) and extending to
+# 500M. NOTE: anneal_lr/anneal_int_coef re-stretch over 500M, so on resume the
+# LR lifts back to ~2e-4 and int_coef re-inflates to ~0.8 — i.e. the extension
+# gets FRESH learning + curiosity budget to escape the Viridian local optimum.
+# Risk: entropy may rise again before re-committing; per-checkpoint stats (now
+# embedded in each .pt) + the every-25-iter cadence let us warm-start from the
+# committed H~0.73 checkpoint if the re-exploration diffuses too far.
 run_name: elsa_genoa_storyladder_v5_1_warmstart
 state_path: states/blue_fight.state
-total_timesteps: 100_000_000
+total_timesteps: 500_000_000
 n_envs: 144
 max_steps: 32768
 n_steps: 64
