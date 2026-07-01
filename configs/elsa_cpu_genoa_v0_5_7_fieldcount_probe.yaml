@@ -1,0 +1,64 @@
+# V0.5.7 — DIRECTIONAL FIELD + count-novelty diagnostic probe (WARM-START from 100M).
+#
+# The V0.5.6 count-novelty probe (job 51276) revived exploration (novelty ~0.14,
+# non-saturating, up to 119k tiles/rollout) but REGRESSED the warm-started 3-rung
+# policy to 1-2 rungs across 3 eval rollouts. Undirected coverage out-competed
+# directed story progress and diffused the Viridian commitment — the agent never
+# reached the parcel, so the parcel-flip reactivation was never even exercised.
+# Diagnosis (the design fleet's central thesis, now confirmed empirically):
+# curiosity TRANSPORTS but does not DIRECT. It needs a directional anchor.
+#
+# V0.5.7 adds A's telescoping distance-to-objective POTENTIAL FIELD on the
+# extrinsic stream (RewardV0_5_7_fieldcount): r_field = W*(d_prev - d_now) over a
+# hand-authored critical-path map graph, objective = Viridian Mart (get parcel) ->
+# Oak's Lab (deliver — the backtrack) -> Pewter Gym (post-Pokedex). Un-multiplied
+# (after the story mult, like HP_DANGER) so it telescopes and is non-farmable
+# (closed walk nets 0; standing still pays 0; re-baselines on flag-flip/off-graph).
+# W=2 = one map-hop, ~1/10 of a BEAT_MON, below combat.
+#
+# Count-novelty (rnd_input:count) STAYS as the within-map transport, but int_coef
+# is dropped 1.0 -> 0.25 so it assists coverage WITHOUT swamping the directional
+# pull that V0.5.6 lacked. Two separable channels: field on the extrinsic
+# (values) head via ext_coef, novelty on values_int via int_coef.
+#
+# WEIGHTS-ONLY warm-start from the 100M V0.5.5 checkpoint (same as V0.5.6): keep
+# the policy that reaches the Viridian wall, then test whether field+novelty
+# transports it DOWN the Oak loop and past the parcel this time.
+#
+# Low-entropy probe (entropy 0.005, 30M steps ~3255 iters). WATCH:
+#   - DIR_FIELD component POSITIVE and rising once the agent descends the corridor.
+#   - Rungs climb PAST VIRIDIAN into PARCEL / RETURN_PALLET / AT_OAK_PARCEL /
+#     RUNG_POKEDEX (the never-crossed backtrack) and STAY -> the wall is cracked.
+#   - Commitment RETAINED (no regression below the 3-rung warm-start baseline).
+run_name: elsa_genoa_storyladder_v0_5_7_fieldcount_probe
+state_path: states/blue_fight.state
+total_timesteps: 30_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_7_fieldcount
+
+# --- Intrinsic novelty: EPISODIC COUNT-BASED (V0.5.6), now SUBORDINATE to the field ---
+rnd_enabled: true          # reuse the intrinsic machinery (values_int head, non-episodic GAE)
+rnd_input: count           # count-based novelty: no neural predictor, per-episode visit counts
+count_coef: 1.0            # bonus scale c in c/sqrt(N+1); bounded (0,1], balance set by int_coef
+ext_coef: 2.0              # extrinsic advantage weight (carries the story ladder + DIR_FIELD)
+int_coef: 0.25             # intrinsic weight DROPPED 1.0 -> 0.25: novelty assists coverage but
+                           # no longer swamps the directional field (the V0.5.6 failure mode).
+anneal_int_coef: false     # NO anneal: the per-EPISODE count reset IS the exploration handoff.
+int_gamma: 0.99            # intrinsic discount (non-episodic stream)

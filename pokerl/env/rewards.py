@@ -1795,6 +1795,112 @@ class RewardV0_5_5_storyladder(RewardV0_5_4_storyladder):
         return reward
 
 
+# --- V0.5.7 directional field: static critical-path map graph + BFS distances ---
+# Hand-authored connectivity of the ~11 maps on the forced path to Brock (verified
+# vs pret/pokered map warps). Game-STRUCTURE constant (not RAM state), so it is a
+# fixed dict, BFS'd once at import into distance-to-goal tables. The field is then
+# a pure dict lookup per step — zero graph work in the hot loop.
+_FIELD_GRAPH: "dict[int, list[int]]" = {
+    rm.MAP_PALLET_TOWN:                [rm.MAP_ROUTE_1, rm.MAP_OAKS_LAB],
+    rm.MAP_ROUTE_1:                    [rm.MAP_PALLET_TOWN, rm.MAP_VIRIDIAN_CITY],
+    rm.MAP_VIRIDIAN_CITY:              [rm.MAP_ROUTE_1, rm.MAP_VIRIDIAN_MART, rm.MAP_ROUTE_2],
+    rm.MAP_OAKS_LAB:                   [rm.MAP_PALLET_TOWN],
+    rm.MAP_VIRIDIAN_MART:              [rm.MAP_VIRIDIAN_CITY],
+    rm.MAP_ROUTE_2:                    [rm.MAP_VIRIDIAN_CITY, rm.MAP_VIRIDIAN_FOREST_SOUTH_GATE],
+    rm.MAP_VIRIDIAN_FOREST_SOUTH_GATE: [rm.MAP_ROUTE_2, rm.MAP_VIRIDIAN_FOREST],
+    rm.MAP_VIRIDIAN_FOREST:            [rm.MAP_VIRIDIAN_FOREST_SOUTH_GATE, rm.MAP_VIRIDIAN_FOREST_NORTH_GATE],
+    rm.MAP_VIRIDIAN_FOREST_NORTH_GATE: [rm.MAP_VIRIDIAN_FOREST, rm.MAP_PEWTER_CITY],
+    rm.MAP_PEWTER_CITY:                [rm.MAP_VIRIDIAN_FOREST_NORTH_GATE, rm.MAP_PEWTER_GYM],
+    rm.MAP_PEWTER_GYM:                 [rm.MAP_PEWTER_CITY],
+}
+
+
+def _bfs_dist(graph: "dict[int, list[int]]", goal: int) -> "dict[int, int]":
+    """Hop-count from every reachable map to `goal` over the undirected graph."""
+    from collections import deque
+    dist = {goal: 0}
+    q = deque([goal])
+    while q:
+        m = q.popleft()
+        for nb in graph.get(m, ()):
+            if nb not in dist:
+                dist[nb] = dist[m] + 1
+                q.append(nb)
+    return dist
+
+
+# One distance table per objective map: Viridian Mart (get parcel), Oak's Lab
+# (deliver parcel — the backtrack), Pewter Gym (post-Pokedex goal).
+_FIELD_DIST: "dict[int, dict[int, int]]" = {
+    g: _bfs_dist(_FIELD_GRAPH, g)
+    for g in (rm.MAP_VIRIDIAN_MART, rm.MAP_OAKS_LAB, rm.MAP_PEWTER_GYM)
+}
+
+
+class RewardV0_5_7_fieldcount(RewardV0_5_5_storyladder):
+    """V0.5.7: V0.5.5 + a directional POTENTIAL FIELD, paired with count-based
+    novelty at a REDUCED int_coef (set in the config, not here).
+
+    The V0.5.6 count-novelty probe (job 51276) revived exploration (novelty ~0.14,
+    non-saturating, up to 119k tiles/rollout) but REGRESSED the warm-started 3-rung
+    policy to 1-2 rungs: undirected coverage out-competed directed story progress
+    and diffused the Viridian commitment, so the agent never reached the parcel and
+    the reactivation mechanism was never even exercised. Lesson (the design fleet's
+    central thesis): curiosity TRANSPORTS but does not DIRECT — it needs an anchor.
+
+    This adds A's telescoping distance-to-objective field on the EXTRINSIC stream,
+    un-multiplied (added after the story multiplier, like HP_DANGER, so it
+    telescopes and stays policy-invariant / non-farmable). Count-novelty
+    (rnd_input='count') stays as the within-map transport but at a subordinate
+    int_coef so it assists coverage without swamping the directional pull.
+
+        objective g(s):  Viridian Mart   if not parcel and not pokedex   (get parcel)
+                         Oak's Lab        if parcel and not pokedex       (THE backtrack)
+                         Pewter Gym       if pokedex and not brock        (north open)
+                         field off        if brock
+
+        r_field = W * (d_prev - d_now)      # = phi(s')-phi(s), phi = -W*d, gamma=1
+
+    Non-farmable: the per-episode sum telescopes to W*(d_0 - d_T), so any closed
+    walk nets exactly 0 — no loop farm; standing still pays 0 (no dawdle). The
+    field RE-BASELINES (pays 0 that step) on an objective flip or an off-graph
+    step, so there is no spurious jump and no double-count with the rung one-shots.
+    W=2: one map-hop = +2, ~1/10 of a BEAT_MON, deliberately below combat.
+    """
+
+    W_FIELD = 2.0
+
+    def _field_objective(self, mem):
+        if rm.beat_brock(mem):        return None
+        if rm.got_pokedex(mem):       return rm.MAP_PEWTER_GYM
+        if rm.got_oaks_parcel(mem):   return rm.MAP_OAKS_LAB
+        return rm.MAP_VIRIDIAN_MART
+
+    def _field_dist_now(self, mem):
+        goal = self._field_objective(mem)
+        m = rm.map_id(mem)
+        if goal is None or m not in _FIELD_DIST[goal]:
+            return None, goal                       # off-graph / done: field paused
+        return _FIELD_DIST[goal][m], goal
+
+    def reset(self, mem) -> None:
+        super().reset(mem)
+        self._field_prev_d, self._field_prev_goal = self._field_dist_now(mem)
+
+    def compute(self, mem) -> float:
+        reward = super().compute(mem)
+        d_now, goal = self._field_dist_now(mem)
+        d_prev, prev_goal = self._field_prev_d, self._field_prev_goal
+        # Emit only when the objective is unchanged AND both endpoints on-graph;
+        # otherwise pay 0 and re-baseline (flag-flip jump / off-graph excursion).
+        if goal == prev_goal and d_now is not None and d_prev is not None:
+            df = self.W_FIELD * (d_prev - d_now)
+            if df != 0.0:
+                reward += self._track("DIR_FIELD", df)
+        self._field_prev_d, self._field_prev_goal = d_now, goal
+        return reward
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1863,6 +1969,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_5_3_storyladder": RewardV0_5_3_storyladder,
     "RewardV0_5_4_storyladder": RewardV0_5_4_storyladder,
     "RewardV0_5_5_storyladder": RewardV0_5_5_storyladder,
+    "RewardV0_5_7_fieldcount": RewardV0_5_7_fieldcount,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,
