@@ -1,0 +1,48 @@
+# V0.5.8 — WITHIN-MAP field refinement probe (FULL-LR arm). Warm-start from 100M.
+#
+# V0.5.7 (job 52469) confirmed the coarse field DIRECTS (DIR_FIELD +, wandering
+# 49k->~100 tiles) but STALLS at ROUTE_1: the map-level potential is flat inside a
+# map, so the long Route 1 traverse has no gradient to the Viridian exit and the
+# subordinate novelty (int_coef 0.25) is too weak to find it. V0.5.8 adds A's
+# within-map local-coordinate term (RewardV0_5_8_fieldcount): distance to the
+# empirically-derived EXIT tile of the next map toward the objective, LAMBDA=0.5,
+# so movement THROUGH Route 1 toward its north exit (10,0) is rewarded step-by-step.
+# Telescopes (non-farmable); a map-hop still dominates (LAMBDA<1).
+#
+# Paired with the LOW-LR arm (…_lowlr_probe, lr 5e-5) to isolate whether the
+# warmstart regression was within-map flatness (this fixes it) vs full-LR restart
+# diffusion (the low-lr arm tests that).
+#
+# WATCH: DIR_FIELD positive+rising, rungs climb PAST ROUTE_1 into VIRIDIAN ->
+# VIRIDIAN_MART -> PARCEL and STAY, above the 3-rung warmstart baseline.
+run_name: elsa_genoa_storyladder_v0_5_8_fieldcount_probe
+state_path: states/blue_fight.state
+total_timesteps: 30_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_8_fieldcount
+
+# --- Intrinsic novelty: count-based, subordinate to the field (same as V0.5.7) ---
+rnd_enabled: true
+rnd_input: count
+count_coef: 1.0
+ext_coef: 2.0
+int_coef: 0.25
+anneal_int_coef: false
+int_gamma: 0.99

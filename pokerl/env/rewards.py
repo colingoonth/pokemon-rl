@@ -1901,6 +1901,77 @@ class RewardV0_5_7_fieldcount(RewardV0_5_5_storyladder):
         return reward
 
 
+# --- V0.5.8 within-map refinement: empirical per-edge EXIT tiles ---------------
+# The (x,y) on `from_map` at which the 100M warm-start policy crosses to
+# `to_map`, derived from 60k steps of that policy (scripts/extract_exit_tiles.py;
+# Route1<->Viridian modal 145-148/148, rock-solid). Only the long corridor maps
+# need this — short maps (Pallet/Mart/Oak/gates) stay coarse. Edges the warm-start
+# never traversed (post-parcel Pallet->Oak, Viridian->Mart) are absent -> those
+# maps fall back to the coarse map-level field, refined later once reached.
+_EXIT_TILE: "dict[tuple[int, int], tuple[int, int]]" = {
+    (rm.MAP_PALLET_TOWN, rm.MAP_ROUTE_1):     (10, 0),    # north out of Pallet
+    (rm.MAP_ROUTE_1, rm.MAP_VIRIDIAN_CITY):   (10, 0),    # north out of Route 1  ← the current stall
+    (rm.MAP_VIRIDIAN_CITY, rm.MAP_ROUTE_1):   (21, 35),   # south out of Viridian (backtrack)
+    (rm.MAP_ROUTE_1, rm.MAP_PALLET_TOWN):     (10, 35),   # south out of Route 1  (backtrack)
+    (rm.MAP_OAKS_LAB, rm.MAP_PALLET_TOWN):    (4, 11),    # out of Oak's Lab
+}
+
+
+class RewardV0_5_8_fieldcount(RewardV0_5_7_fieldcount):
+    """V0.5.7 + WITHIN-MAP field refinement (A's design §1.4).
+
+    The V0.5.7 probe (jobs 52469) confirmed the coarse field DIRECTS (DIR_FIELD
+    positive, wandering collapsed 49k->~100 tiles) but STALLS at ROUTE_1: the
+    map-level potential is FLAT inside a map, so on the long Route 1 traverse there
+    is no gradient to the Viridian exit, and the subordinate count-novelty
+    (int_coef 0.25) is too weak to find it — the agent freezes rather than risk the
+    -W reversal tax on a flat, tax-exposed traverse.
+
+    Fix: add a within-map local-coordinate term so movement TOWARD the exit tile
+    (one hop closer to the objective) is rewarded step-by-step:
+
+        phi_fine(s) = -W * ( d_map(m,g) + LAMBDA * localfrac(m, x, y, g) )
+        localfrac   = manhattan((x,y), EXIT_TILE[m -> next_map_toward_g]) / SCALE   in [0,1)
+
+    LAMBDA<1 keeps a boundary crossing (delta d_map = 1) strictly dominant over any
+    within-map wiggle, so the two layers never fight. Still a pure function of
+    state -> telescopes identically (non-farmable: closed walk nets 0). Maps with
+    no exit tile fall back to LAMBDA*0 = the coarse V0.5.7 behavior.
+    """
+
+    LAMBDA_FINE = 0.5     # within-map weight; < 1 so a map-hop always dominates
+    FINE_SCALE = 48.0     # manhattan normalizer (~max on Route 1); localfrac clamped <1
+
+    def _next_map_toward(self, m: int, goal: int):
+        """Neighbor of `m` with the smallest distance to `goal` (direction of
+        progress), or None if `m` is the goal / has no closer neighbor."""
+        dist = _FIELD_DIST[goal]
+        here = dist.get(m)
+        if here is None or here == 0:
+            return None
+        best, best_d = None, here
+        for nb in _FIELD_GRAPH.get(m, ()):
+            d = dist.get(nb)
+            if d is not None and d < best_d:
+                best, best_d = nb, d
+        return best
+
+    def _field_dist_now(self, mem):
+        goal = self._field_objective(mem)
+        m = rm.map_id(mem)
+        if goal is None or m not in _FIELD_DIST[goal]:
+            return None, goal                       # off-graph / done
+        d_map = _FIELD_DIST[goal][m]
+        nxt = self._next_map_toward(m, goal)
+        exit_xy = _EXIT_TILE.get((m, nxt)) if nxt is not None else None
+        if exit_xy is not None:
+            x, y = rm.player_position(mem)
+            man = abs(x - exit_xy[0]) + abs(y - exit_xy[1])
+            localfrac = min(man / self.FINE_SCALE, 0.999)   # clamp so LAMBDA*frac<1
+            return d_map + self.LAMBDA_FINE * localfrac, goal
+        return float(d_map), goal                   # no exit tile -> coarse fallback
+
+
 class RewardV0_3_2_h10(RewardV0_3_1):
     """V0.3.1 + PC_HEAL_LOW bumped 5 -> 10 (conservative arm of the
     h-sweep). Smallest measurable change from V0.3.1; tests whether
@@ -1970,6 +2041,7 @@ REWARD_REGISTRY: dict[str, type] = {
     "RewardV0_5_4_storyladder": RewardV0_5_4_storyladder,
     "RewardV0_5_5_storyladder": RewardV0_5_5_storyladder,
     "RewardV0_5_7_fieldcount": RewardV0_5_7_fieldcount,
+    "RewardV0_5_8_fieldcount": RewardV0_5_8_fieldcount,
     "RewardV0_3_2_h10": RewardV0_3_2_h10,
     "RewardV0_3_2_h25": RewardV0_3_2_h25,
     "RewardV0_3_2_h35": RewardV0_3_2_h35,
