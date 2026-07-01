@@ -1,0 +1,68 @@
+# V0.5.6 — COUNT-NOVELTY diagnostic probe (WARM-START from the 100M checkpoint).
+#
+# What this tests: replace the EXHAUSTED global RND (mean_int_reward ~1.7e-5,
+# novelty ~0) with EPISODIC COUNT-BASED novelty that never PERMANENTLY
+# saturates. Bonus = count_coef/sqrt(N+1) on the per-env per-EPISODE visit count
+# of the cell key (map_id, x, y, progress_bits). The progress_bits in the key is
+# the point: when got_oaks_parcel flips in Viridian, every already-walked
+# Route-1/Pallet/Oak tile becomes a FRESH cell (N=0) within the same episode, so
+# novelty RE-ACTIVATES on the forced Oak backtrack — the flagless desert of
+# already-seen tiles where RND (seen outbound, globally exhausted) gives zero
+# pull and the sparse rung ladder gives no gradient to START the descent.
+#
+# This is a WEIGHTS-ONLY warm-start: the sbatch extracts the bare `net` weights
+# from the 100M V0.5.5 warm-start checkpoint (v5_1_warmstart_final.pt) and passes
+# them via --resume, so ppo.py transfers policy weights only (fresh optimizer /
+# LR schedule / step counter, and NO RND state — we are switching intrinsic
+# modes). We keep the policy that reliably reaches the Viridian WALL and test,
+# at the wall, whether count-novelty transports it down the Oak loop.
+#
+# NO reward-class change (still RewardV0_5_5_storyladder — the rungs remain the
+# directional ANCHOR; count-novelty is the dense TRANSPORT between them). NO obs
+# concat / progress-bits-into-net (staged for later). NO A-field (staged).
+#
+# Low-entropy probe per the discipline (CLAUDE.md): entropy_coef 0.005 so the
+# policy COMMITS fast and reveals whether the reactivation transports it south or
+# whether it dithers in Viridian. ~30M steps: n_steps 64 * n_envs 144 = 9216
+# global/iter -> ~3255 iters; watch the last checkpoints (~iter 3000, ~28M steps).
+#
+# Signals to watch (per the pokerl check-in convention):
+#   - After the parcel flip, mean_int_reward SPIKES (fresh parcel=1 cells) and
+#     tiles/coverage climb ON THE RETURN LEG -> reactivation firing.
+#   - Rungs climb past VIRIDIAN into RETURN_PALLET / AT_OAK_PARCEL / RUNG_POKEDEX
+#     (the never-crossed backtrack) and STAY.
+#   - FAIL (directionality gap): parcel obtained, int_reward spikes, but coverage
+#     stays in Viridian and no RETURN rungs fire -> lean on the anchors, not knobs.
+run_name: elsa_genoa_storyladder_v0_5_6_count_probe
+state_path: states/blue_fight.state
+total_timesteps: 30_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_5_storyladder
+
+# --- Intrinsic novelty: EPISODIC COUNT-BASED (V0.5.6), replaces exhausted RND ---
+rnd_enabled: true          # reuse the intrinsic machinery (values_int head, non-episodic GAE)
+rnd_input: count           # count-based novelty: no neural predictor, per-episode visit counts
+count_coef: 1.0            # bonus scale c in c/sqrt(N+1); bounded (0,1], balance set by int_coef
+ext_coef: 2.0              # extrinsic advantage weight (unchanged)
+int_coef: 1.0              # intrinsic advantage weight — CONSTANT (modest), reused from v5
+anneal_int_coef: false     # NO anneal: the per-EPISODE count reset IS the exploration handoff.
+                           # (Aggressive int_coef anneal + LR re-inflation is what re-diffused
+                           #  the 500M extension off its committed Viridian behavior.)
+int_gamma: 0.99            # intrinsic discount (non-episodic stream)

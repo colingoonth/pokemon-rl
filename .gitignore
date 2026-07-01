@@ -43,3 +43,6 @@ Thumbs.db
 
 # Local sync loops that embed plaintext cluster credentials — never commit
 scripts/sync_latest_loop*.sh
+
+# cmux orchestration fleet scratch
+.fleet/

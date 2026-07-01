@@ -142,3 +142,58 @@ def test_warmstart_two_head_checkpoint_loads_strict_false():
     assert unexpected == []
     assert all(k.startswith("critic_int") for k in missing)
     assert len(missing) == 2  # weight + bias
+
+
+# --- V0.5.6 count-based episodic novelty ------------------------------------
+
+def test_count_bonus_decays_with_revisits():
+    """coef/sqrt(N+1): a fresh cell pays coef, revisits diminish monotonically."""
+    from pokerl.agent.ppo import count_novelty_bonus
+    d = {}
+    cell = (0x0C, 5, 7, (0, 0, 0, 0))
+    b1 = count_novelty_bonus(d, cell, 1.0)
+    b2 = count_novelty_bonus(d, cell, 1.0)
+    b3 = count_novelty_bonus(d, cell, 1.0)
+    assert b1 == 1.0                       # N=0 -> 1/sqrt(1)
+    assert np.isclose(b2, 1.0 / np.sqrt(2))
+    assert np.isclose(b3, 1.0 / np.sqrt(3))
+    assert b1 > b2 > b3                     # strictly decreasing
+    assert 0.0 < b3 <= 1.0                  # bounded in (0, coef]
+
+
+def test_count_bonus_progress_flip_reactivates_same_tile():
+    """The standout mechanism: the SAME (map,x,y) tile, once its progress bits
+    flip (parcel obtained), is a fresh cell again -> full bonus. This is what
+    re-lights the already-walked Oak backtrack within an episode."""
+    from pokerl.agent.ppo import count_novelty_bonus
+    d = {}
+    xy = (0x0C, 5, 7)
+    before = xy + ((0, 0, 0, 0),)           # pre-parcel
+    after = xy + ((1, 0, 0, 0),)            # got_oaks_parcel flipped
+    # walk the tile down to a low bonus pre-parcel
+    for _ in range(9):
+        count_novelty_bonus(d, before, 1.0)
+    stale = count_novelty_bonus(d, before, 1.0)   # 10th visit: 1/sqrt(10)
+    refreshed = count_novelty_bonus(d, after, 1.0)  # same tile, new progress: 1/sqrt(1)
+    assert np.isclose(stale, 1.0 / np.sqrt(10))
+    assert refreshed == 1.0
+    assert refreshed > stale * 3            # reactivation is a large jump
+
+
+def test_count_bonus_distinct_cells_independent():
+    """Distinct cells keep independent counts (no cross-cell contamination)."""
+    from pokerl.agent.ppo import count_novelty_bonus
+    d = {}
+    a = (0x0C, 1, 1, (0, 0, 0, 0))
+    b = (0x0C, 2, 2, (0, 0, 0, 0))
+    count_novelty_bonus(d, a, 1.0)
+    count_novelty_bonus(d, a, 1.0)
+    assert count_novelty_bonus(d, b, 1.0) == 1.0   # b still fresh
+
+
+def test_ppoconfig_accepts_count_mode():
+    """Config plumbing: rnd_input='count' + count_coef are valid PPOConfig fields."""
+    from pokerl.agent.ppo import PPOConfig
+    cfg = PPOConfig(rnd_enabled=True, rnd_input="count", count_coef=1.0)
+    assert cfg.rnd_input == "count"
+    assert cfg.count_coef == 1.0

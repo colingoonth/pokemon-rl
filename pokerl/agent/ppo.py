@@ -12,6 +12,7 @@ References for anyone reading this later:
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +76,22 @@ def apply_truncation_bootstrap(
     return out
 
 
+def count_novelty_bonus(count_dict: dict, cell, coef: float) -> float:
+    """Episodic count-based novelty for one env-step (V0.5.6).
+
+    `cell` is the hashable key — here (map_id, x, y, progress_bits). Returns
+    `coef / sqrt(N+1)` for the current per-episode visit count N of that cell,
+    then increments the count in place. Bounded in (0, coef] and strictly
+    decreasing in N, so revisits diminish and a genuinely fresh cell — including
+    one freshly re-keyed by a story-flag flip (the Oak-parcel backtrack) — pays
+    the maximum. The count dict is cleared per episode by the caller, which is
+    what keeps this from PERMANENTLY saturating like global RND.
+    """
+    n = count_dict.get(cell, 0)
+    count_dict[cell] = n + 1
+    return coef / math.sqrt(n + 1)
+
+
 @dataclass
 class PPOConfig:
     total_timesteps: int = 10_000
@@ -133,11 +150,22 @@ class PPOConfig:
     rnd_input: str = "frame"        # "frame" = conv-over-pixels (original, noisy-TV prone on
                                     # overworld animation); "ram" = map_id/x/y + progress, so
                                     # novelty is animation-invariant and a story-flag flip
-                                    # refreshes it across the map (drives the Oak backtrack).
+                                    # refreshes it across the map (drives the Oak backtrack);
+                                    # "count" = episodic count-based novelty (V0.5.6): NO neural
+                                    # predictor — per-env per-episode visit counts of the cell
+                                    # (map_id,x,y,progress_bits), bonus count_coef/sqrt(N+1),
+                                    # reset each episode so it never PERMANENTLY saturates like
+                                    # global RND. The progress_bits in the key re-light already-
+                                    # walked tiles when a story flag flips (the Oak backtrack).
     rnd_num_maps: int = 256         # map_id embedding-table size (ram mode)
     rnd_n_fourier: int = 128        # random Fourier features for (x,y) (ram mode)
     rnd_fourier_scale: float = 16.0 # Fourier frequency scale = spatial-granularity knob (ram mode):
                                     # higher = sharper per-tile novelty, lower = smoother coverage
+    count_coef: float = 1.0         # count-novelty bonus scale c in c/sqrt(N+1) (count mode).
+                                    # Absolute value is washed out by per-stream advantage
+                                    # normalization (cross-stream balance is int_coef's job), so
+                                    # c=1 keeps the bonus bounded in (0,1]; it is a value-head
+                                    # conditioning constant, not a balance knob.
 
 
 @dataclass
@@ -189,12 +217,16 @@ class RolloutBuffer:
         if rnd:
             buf.values_int = z2()
             buf.rewards_int = z2()
-            buf.rnd_progress = torch.zeros((n_steps, n_envs, progress_dim), dtype=torch.float32, device=device)
-            if rnd_input == "ram":
-                buf.rnd_state = torch.zeros((n_steps, n_envs, state_dim), dtype=torch.float32, device=device)
-            else:
-                h, w = obs_shape[-2], obs_shape[-1]
-                buf.rnd_frame = torch.zeros((n_steps, n_envs, 1, h, w), dtype=torch.uint8, device=device)
+            # Count mode needs only the intrinsic value/reward streams — there is
+            # no neural predictor to train, so no landed frame/state/progress
+            # buffers are allocated.
+            if rnd_input != "count":
+                buf.rnd_progress = torch.zeros((n_steps, n_envs, progress_dim), dtype=torch.float32, device=device)
+                if rnd_input == "ram":
+                    buf.rnd_state = torch.zeros((n_steps, n_envs, state_dim), dtype=torch.float32, device=device)
+                else:
+                    h, w = obs_shape[-2], obs_shape[-1]
+                    buf.rnd_frame = torch.zeros((n_steps, n_envs, 1, h, w), dtype=torch.uint8, device=device)
         return buf
 
     @staticmethod
@@ -347,23 +379,35 @@ def train(
     # --- RND (curiosity) setup ---
     rnd_model: RNDModel | None = None
     obs_rms = reward_rms = rff = None
+    count_dicts: list[dict] | None = None   # count mode: per-env per-episode visit counts
     progress_dim = 0
     if cfg.rnd_enabled:
         from pokerl.env import ram_map as _rm
-        progress_dim = _rm.PROGRESS_DIM
-        frame_shape = (1, obs_shape[-2], obs_shape[-1])
-        rnd_model = RNDModel(
-            frame_shape, progress_dim, feature_dim=cfg.rnd_feature_dim,
-            input_mode=cfg.rnd_input, num_maps=cfg.rnd_num_maps,
-            n_fourier=cfg.rnd_n_fourier, fourier_scale=cfg.rnd_fourier_scale,
-        ).to(device)
-        # obs_rms only normalizes the frame path. In "ram" mode the encoder does
-        # its own deterministic featurization (embedding + Fourier on bounded
-        # RAM values), so the running per-pixel normalizer is unused.
-        if cfg.rnd_input == "frame":
-            obs_rms = RunningMeanStd(shape=frame_shape)   # per-pixel obs normalization
-        reward_rms = RunningMeanStd(shape=())             # intrinsic-return std
-        rff = RewardForwardFilter(cfg.int_gamma, n_envs_local)
+        if cfg.rnd_input not in ("frame", "ram", "count"):
+            raise ValueError(
+                f"unknown rnd_input {cfg.rnd_input!r} (expected 'frame', 'ram', or 'count')"
+            )
+        if cfg.rnd_input == "count":
+            # Count-based episodic novelty (V0.5.6): no neural predictor, no
+            # obs/return normalization. One visit-count dict per env, cleared on
+            # that env's episode boundary; the bonus is computed directly in the
+            # rollout loop. progress_dim stays 0 (no predictor buffers).
+            count_dicts = [dict() for _ in range(n_envs_local)]
+        else:
+            progress_dim = _rm.PROGRESS_DIM
+            frame_shape = (1, obs_shape[-2], obs_shape[-1])
+            rnd_model = RNDModel(
+                frame_shape, progress_dim, feature_dim=cfg.rnd_feature_dim,
+                input_mode=cfg.rnd_input, num_maps=cfg.rnd_num_maps,
+                n_fourier=cfg.rnd_n_fourier, fourier_scale=cfg.rnd_fourier_scale,
+            ).to(device)
+            # obs_rms only normalizes the frame path. In "ram" mode the encoder does
+            # its own deterministic featurization (embedding + Fourier on bounded
+            # RAM values), so the running per-pixel normalizer is unused.
+            if cfg.rnd_input == "frame":
+                obs_rms = RunningMeanStd(shape=frame_shape)   # per-pixel obs normalization
+            reward_rms = RunningMeanStd(shape=())             # intrinsic-return std
+            rff = RewardForwardFilter(cfg.int_gamma, n_envs_local)
 
     # The predictor trains alongside the policy (target is frozen). One Adam
     # over both keeps the loop simple; LR annealing applies to all groups.
@@ -494,10 +538,12 @@ def train(
             "total_timesteps": cfg.total_timesteps,
             "stats": stats or {},
         }
-        if cfg.rnd_enabled:
+        if cfg.rnd_enabled and rnd_model is not None:
             # The frozen target net IS the novelty function — persist it, the
             # predictor's progress, and both running normalizers, or a resume
             # silently restarts exploration from a different random target.
+            # (Count mode has no neural RND / normalizers — its visit counts are
+            # per-episode ephemeral, so there is nothing to persist.)
             ckpt["rnd"] = rnd_model.state_dict()
             ckpt["obs_rms"] = None if obs_rms is None else {
                 "mean": obs_rms.mean, "var": obs_rms.var, "count": obs_rms.count,
@@ -603,11 +649,14 @@ def train(
                 # Substitute them (mirrors the extrinsic truncation bootstrap) so
                 # novelty, the predictor target, and the battle mask all use the
                 # real landed state — not the next episode's start.
-                ram_mode = cfg.rnd_input == "ram"
+                count_mode = cfg.rnd_input == "count"
+                # Both "ram" and "count" key novelty on the [map_id,x,y] state
+                # vector + progress bits; only "frame" uses the pixel path.
+                state_mode = cfg.rnd_input in ("ram", "count")
                 landed = obs_np[:, -1:, :, :].copy()             # (n_envs,1,H,W); frame mode
                 prog_np = np.asarray(info["progress"], dtype=np.float32).copy()
                 inbatt = np.asarray(info["in_battle"]).copy()
-                if ram_mode:
+                if state_mode:
                     state_np = np.asarray(info["rnd_state"], dtype=np.float32).copy()
                 fmask = np.asarray(info.get("_final_obs", np.zeros(n_envs_local, dtype=bool)))
                 if fmask.any():
@@ -621,33 +670,59 @@ def train(
                             prog_np[i] = np.asarray(fin_prog[i], dtype=np.float32)
                         if fin_batt is not None:
                             inbatt[i] = fin_batt[i]
-                        if ram_mode and fin_state is not None:
+                        if state_mode and fin_state is not None:
                             state_np[i] = np.asarray(fin_state[i], dtype=np.float32)
-                # Build the RND observation: raw state vector (ram mode) or the
-                # running-normalized + clipped frame (frame mode).
-                if ram_mode:
-                    rnd_obs = torch.as_tensor(state_np, dtype=torch.float32, device=device)
+                if count_mode:
+                    # Count-based episodic novelty. Bonus = count_coef/sqrt(N+1)
+                    # on the per-env per-episode visit count of the cell key
+                    # (map_id, x, y, progress_bits). progress_bits in the key is
+                    # what re-lights already-walked tiles the moment a story flag
+                    # flips (the Oak-parcel backtrack), and the per-episode reset
+                    # (below) is what stops it PERMANENTLY saturating like global
+                    # RND. Battle steps pay 0 (x,y frozen + unlearnable RNG).
+                    nov = np.zeros(n_envs_local, dtype=np.float32)
+                    for i in range(n_envs_local):
+                        if inbatt[i] > 0:
+                            continue
+                        m, x, y = state_np[i]
+                        key = (int(m), int(x), int(y),
+                               tuple(int(v) for v in prog_np[i]))
+                        nov[i] = count_novelty_bonus(count_dicts[i], key, cfg.count_coef)
                 else:
-                    obs_rms.update(landed.astype(np.float64))
-                    fn = np.clip(
-                        (landed - obs_rms.mean) / (obs_rms.std + 1e-8),
-                        -cfg.rnd_obs_clip, cfg.rnd_obs_clip,
-                    )
-                    rnd_obs = torch.as_tensor(fn, dtype=torch.float32, device=device)
-                with torch.no_grad():
-                    nov = rnd_model.novelty(
-                        rnd_obs,
-                        torch.as_tensor(prog_np, device=device),
-                    ).cpu().numpy()
+                    # Build the RND observation: raw state vector (ram mode) or the
+                    # running-normalized + clipped frame (frame mode).
+                    if state_mode:
+                        rnd_obs = torch.as_tensor(state_np, dtype=torch.float32, device=device)
+                    else:
+                        obs_rms.update(landed.astype(np.float64))
+                        fn = np.clip(
+                            (landed - obs_rms.mean) / (obs_rms.std + 1e-8),
+                            -cfg.rnd_obs_clip, cfg.rnd_obs_clip,
+                        )
+                        rnd_obs = torch.as_tensor(fn, dtype=torch.float32, device=device)
+                    with torch.no_grad():
+                        nov = rnd_model.novelty(
+                            rnd_obs,
+                            torch.as_tensor(prog_np, device=device),
+                        ).cpu().numpy()
                 # Battle-mask: battle RNG is unlearnable noisy-TV; pay no
-                # curiosity for landing in / sitting through a battle.
+                # curiosity for landing in / sitting through a battle. (Count mode
+                # already skipped battle steps above; this stays idempotent.)
+                nov = np.asarray(nov, dtype=np.float32)
                 nov[inbatt > 0] = 0.0
                 buf.rewards_int[step] = torch.as_tensor(nov, dtype=torch.float32, device=device)
-                if ram_mode:
+                if count_mode:
+                    # Reset each finished env's count dict AFTER its terminal step
+                    # is counted, so the next (reset) step starts fresh — this is
+                    # the per-episode reset that revives novelty on the return leg.
+                    for i in np.nonzero(done_np)[0]:
+                        count_dicts[i].clear()
+                elif state_mode:
                     buf.rnd_state[step] = torch.as_tensor(state_np, dtype=torch.float32, device=device)
+                    buf.rnd_progress[step] = torch.as_tensor(prog_np, device=device)
                 else:
                     buf.rnd_frame[step] = torch.as_tensor(landed, dtype=torch.uint8, device=device)
-                buf.rnd_progress[step] = torch.as_tensor(prog_np, device=device)
+                    buf.rnd_progress[step] = torch.as_tensor(prog_np, device=device)
 
         # Rollout = env-collection half (forward + envs.step + RND novelty). The
         # remainder of the iter is the update half (GAE + n_epochs of SGD). The
@@ -669,20 +744,27 @@ def train(
         mean_int_reward = 0.0
         mean_raw_novelty = 0.0
         if cfg.rnd_enabled:
-            # Normalize intrinsic rewards by the running std of the discounted
-            # intrinsic RETURNS (keeps novelty scale stable as the predictor
-            # learns), clip, then non-episodic GAE.
             ri = buf.rewards_int.cpu().numpy()                  # (n_steps, n_envs)
             # Raw (pre-normalization) novelty: THIS is the curiosity-decay signal.
-            # mean_int_reward below is post-norm and hovers near a fixed scale by
-            # construction, so it can't show whether novelty is actually falling.
             mean_raw_novelty = float(ri.mean())
-            disc_returns = np.array([rff.update(ri[t]) for t in range(ri.shape[0])])
-            reward_rms.update(disc_returns.reshape(-1))
-            ri_norm = np.clip(ri / (np.sqrt(reward_rms.var) + 1e-8),
-                              -cfg.rnd_int_clip, cfg.rnd_int_clip)
-            buf.rewards_int = torch.as_tensor(ri_norm, dtype=torch.float32, device=device)
-            mean_int_reward = float(buf.rewards_int.mean().item())
+            if cfg.rnd_input == "count":
+                # BYPASS the shared intrinsic return-RMS: the count bonus is
+                # already bounded in (0, count_coef], and per-stream advantage
+                # normalization sets cross-stream balance via int_coef. Running
+                # the shared RMS here would let heterogeneous per-episode coverage
+                # (esp. under a state-curriculum) jerk the reward scale around for
+                # no benefit. Feed the raw bonus straight to intrinsic GAE.
+                mean_int_reward = float(buf.rewards_int.mean().item())
+            else:
+                # Normalize intrinsic rewards by the running std of the discounted
+                # intrinsic RETURNS (keeps novelty scale stable as the predictor
+                # learns), clip, then non-episodic GAE.
+                disc_returns = np.array([rff.update(ri[t]) for t in range(ri.shape[0])])
+                reward_rms.update(disc_returns.reshape(-1))
+                ri_norm = np.clip(ri / (np.sqrt(reward_rms.var) + 1e-8),
+                                  -cfg.rnd_int_clip, cfg.rnd_int_clip)
+                buf.rewards_int = torch.as_tensor(ri_norm, dtype=torch.float32, device=device)
+                mean_int_reward = float(buf.rewards_int.mean().item())
             buf.compute_gae_intrinsic(last_values_int_t, cfg.int_gamma, cfg.gae_lambda)
 
         # Flatten (n_steps, n_envs_local, ...) -> (batch_size_local, ...)
@@ -695,14 +777,17 @@ def train(
         if cfg.rnd_enabled:
             b_adv_int = buf.advantages_int.reshape(batch_size_local)
             b_ret_int = buf.returns_int.reshape(batch_size_local)
-            b_rnd_prog = buf.rnd_progress.reshape((batch_size_local, progress_dim))
-            if cfg.rnd_input == "ram":
-                b_rnd_state = buf.rnd_state.reshape((batch_size_local, buf.rnd_state.shape[-1]))
-            else:
-                fh, fw = obs_shape[-2], obs_shape[-1]
-                b_rnd_frame = buf.rnd_frame.reshape((batch_size_local, 1, fh, fw))
-                obs_mean_t = torch.as_tensor(obs_rms.mean, dtype=torch.float32, device=device)
-                obs_std_t = torch.as_tensor(obs_rms.std, dtype=torch.float32, device=device)
+            # Predictor-training buffers exist only when there's a neural RND
+            # (frame/ram). Count mode has none — only the intrinsic value head.
+            if rnd_model is not None:
+                b_rnd_prog = buf.rnd_progress.reshape((batch_size_local, progress_dim))
+                if cfg.rnd_input == "ram":
+                    b_rnd_state = buf.rnd_state.reshape((batch_size_local, buf.rnd_state.shape[-1]))
+                else:
+                    fh, fw = obs_shape[-2], obs_shape[-1]
+                    b_rnd_frame = buf.rnd_frame.reshape((batch_size_local, 1, fh, fw))
+                    obs_mean_t = torch.as_tensor(obs_rms.mean, dtype=torch.float32, device=device)
+                    obs_std_t = torch.as_tensor(obs_rms.std, dtype=torch.float32, device=device)
 
         # Raw per-stream advantage scales (pre per-minibatch normalization). The
         # gap shows what ext_coef:int_coef is really weighting against.
@@ -770,18 +855,21 @@ def train(
                     # Train the predictor on a random subset (update_proportion)
                     # of the minibatch's landed observations (normalized as in
                     # rollout for frame mode; raw state vector for ram mode).
-                    if cfg.rnd_input == "ram":
-                        rnd_obs_mb = b_rnd_state[mb_idx]
-                    else:
-                        fr = b_rnd_frame[mb_idx].float()
-                        rnd_obs_mb = ((fr - obs_mean_t) / (obs_std_t + 1e-8)).clamp(
-                            -cfg.rnd_obs_clip, cfg.rnd_obs_clip
-                        )
-                    nov_train = rnd_model.novelty(rnd_obs_mb, b_rnd_prog[mb_idx])
-                    keep = (torch.rand(nov_train.shape[0], device=device)
-                            < cfg.rnd_update_proportion).float()
-                    rnd_loss = (nov_train * keep).sum() / (keep.sum() + 1e-8)
-                    last_rnd_loss = float(rnd_loss.item())
+                    # Count mode has no predictor — only the intrinsic value head
+                    # above is trained; rnd_loss stays 0.
+                    if rnd_model is not None:
+                        if cfg.rnd_input == "ram":
+                            rnd_obs_mb = b_rnd_state[mb_idx]
+                        else:
+                            fr = b_rnd_frame[mb_idx].float()
+                            rnd_obs_mb = ((fr - obs_mean_t) / (obs_std_t + 1e-8)).clamp(
+                                -cfg.rnd_obs_clip, cfg.rnd_obs_clip
+                            )
+                        nov_train = rnd_model.novelty(rnd_obs_mb, b_rnd_prog[mb_idx])
+                        keep = (torch.rand(nov_train.shape[0], device=device)
+                                < cfg.rnd_update_proportion).float()
+                        rnd_loss = (nov_train * keep).sum() / (keep.sum() + 1e-8)
+                        last_rnd_loss = float(rnd_loss.item())
 
                 loss = (policy_loss + cfg.value_coef * value_loss
                         - cfg.entropy_coef * entropy + rnd_loss)
