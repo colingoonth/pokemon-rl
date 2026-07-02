@@ -44,6 +44,7 @@ class ActorCritic(nn.Module):
         obs_shape: tuple[int, int, int],   # (C, H, W) — C is frame_stack
         n_actions: int,
         hidden_dim: int = 512,
+        progress_dim: int = 4,             # story-progress bits fused at the head input
     ) -> None:
         super().__init__()
         c, h, w = obs_shape
@@ -68,34 +69,48 @@ class ActorCritic(nn.Module):
             nn.ReLU(),
         )
 
-        # Output heads: small init on actor (encourages near-uniform initial
-        # policy), gain=1 on critics.
-        self.actor = _layer_init(nn.Linear(hidden_dim, n_actions), std=0.01)
-        self.critic = _layer_init(nn.Linear(hidden_dim, 1), std=1.0)
+        # Output heads take the visual feature CONCATENATED with the raw
+        # story-progress bits (V0.5.9, "Step 0"): the pixels can't reveal
+        # whether the parcel is held, so the policy/value were blind to the
+        # single fact that flips the optimal direction at Oak. Fusing the 4
+        # bits at the head input lets each head learn a per-bit weight while
+        # the visual backbone+fc transfer verbatim from the warm-start
+        # (features() shape is unchanged; only these heads resize -> reinit).
+        head_in = hidden_dim + progress_dim
+        # small init on actor (encourages near-uniform initial policy),
+        # gain=1 on critics.
+        self.actor = _layer_init(nn.Linear(head_in, n_actions), std=0.01)
+        self.critic = _layer_init(nn.Linear(head_in, 1), std=1.0)
         # Intrinsic-value head (RND). New key vs the pre-RND checkpoint, so it
         # initializes fresh on a strict=False warm-start.
-        self.critic_int = _layer_init(nn.Linear(hidden_dim, 1), std=1.0)
+        self.critic_int = _layer_init(nn.Linear(head_in, 1), std=1.0)
 
     def features(self, obs: torch.Tensor) -> torch.Tensor:
-        # obs is uint8 in [0, 255]; PPO expects float in [0, 1]
+        # obs is uint8 in [0, 255]; PPO expects float in [0, 1]. Returns the
+        # 512-d VISUAL feature only — name/shape unchanged so the warm-start
+        # transfers backbone+fc verbatim (strict=False).
         x = obs.float() / 255.0
         x = self.backbone(x)
         return self.fc(x)
 
+    def _fused(self, obs: torch.Tensor, progress: torch.Tensor) -> torch.Tensor:
+        """Visual feature concatenated with the raw story-progress bits."""
+        return torch.cat([self.features(obs), progress.float()], dim=-1)
+
     def forward(
-        self, obs: torch.Tensor
+        self, obs: torch.Tensor, progress: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        h = self.features(obs)
+        h = self._fused(obs, progress)
         return (
             self.actor(h),
             self.critic(h).squeeze(-1),
             self.critic_int(h).squeeze(-1),
         )
 
-    def value(self, obs: torch.Tensor) -> torch.Tensor:
+    def value(self, obs: torch.Tensor, progress: torch.Tensor) -> torch.Tensor:
         """Extrinsic value V_ext(s)."""
-        return self.critic(self.features(obs)).squeeze(-1)
+        return self.critic(self._fused(obs, progress)).squeeze(-1)
 
-    def value_int(self, obs: torch.Tensor) -> torch.Tensor:
+    def value_int(self, obs: torch.Tensor, progress: torch.Tensor) -> torch.Tensor:
         """Intrinsic value V_int(s) (RND novelty stream)."""
-        return self.critic_int(self.features(obs)).squeeze(-1)
+        return self.critic_int(self._fused(obs, progress)).squeeze(-1)

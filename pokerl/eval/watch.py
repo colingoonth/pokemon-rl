@@ -21,6 +21,7 @@ import torch
 from torch.distributions import Categorical
 
 from pokerl.agent.networks import ActorCritic
+from pokerl.env import ram_map as rm
 from pokerl.env.make import make_env
 from pokerl.env.pokemon_red_env import ACTIONS
 from pokerl.env.rewards import get_reward_cls
@@ -100,6 +101,9 @@ def main() -> None:
         env.unwrapped.pyboy.set_emulation_speed(args.speed)
     obs, _ = env.reset()
     net = load_net(args.checkpoint, obs.shape, n_actions=len(ACTIONS))
+    # Live RAM view for the story-progress bits the policy/value net now
+    # consumes (V0.5.9 "Step 0"). Read fresh each step so prog pairs with obs.
+    mem = env.unwrapped.pyboy.memory  # type: ignore[attr-defined]
 
     frames: list[np.ndarray] = []
     if args.record:
@@ -118,8 +122,11 @@ def main() -> None:
 
     for step in range(args.steps):
         obs_t = torch.from_numpy(obs).unsqueeze(0)
+        prog_t = torch.tensor(
+            [rm.progress_bits(mem)], dtype=torch.float32
+        )  # (1, PROGRESS_DIM), current story bits
         with torch.no_grad():
-            logits = net(obs_t)[0]  # (logits, value_ext, value_int) — only logits needed
+            logits = net(obs_t, prog_t)[0]  # (logits, value_ext, value_int) — only logits needed
         if args.deterministic:
             action = int(logits.argmax(dim=-1).item())
         else:

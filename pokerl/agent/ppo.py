@@ -38,10 +38,11 @@ def apply_truncation_bootstrap(
     term_np,
     trunc_np,
     info: dict,
-    value_fn: Callable[[torch.Tensor], torch.Tensor],
+    value_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     gamma: float,
     n_envs: int,
     device: torch.device | str,
+    progress_dim: int = 4,
 ) -> torch.Tensor:
     """Fold the time-limit bootstrap into truncated steps' rewards.
 
@@ -68,12 +69,57 @@ def apply_truncation_bootstrap(
         return rewards_step
     idxs = np.nonzero(trunc_only)[0]
     final_obs_arr = np.stack([info["final_obs"][i] for i in idxs])
+    # The value head now also consumes the story-progress bits, so bootstrap
+    # V(final_obs) with the TERMINAL progress (from final_info), not the reset
+    # episode's. Missing final_info progress falls back to zeros (curriculum
+    # start has all bits clear anyway).
+    fin_prog = info.get("final_info", {}).get("progress")
+    if fin_prog is not None:
+        final_prog_arr = np.stack([np.asarray(fin_prog[i], dtype=np.float32) for i in idxs])
+    else:
+        final_prog_arr = np.zeros((len(idxs), progress_dim), dtype=np.float32)
     with torch.no_grad():
-        final_vals = value_fn(torch.from_numpy(final_obs_arr).to(device)).reshape(-1)
+        final_vals = value_fn(
+            torch.from_numpy(final_obs_arr).to(device),
+            torch.from_numpy(final_prog_arr).to(device),
+        ).reshape(-1)
     idx_t = torch.as_tensor(idxs, device=device, dtype=torch.long)
     out = rewards_step.clone()
     out[idx_t] = out[idx_t] + gamma * final_vals
     return out
+
+
+def pad_progress_head_weights(net_state: dict, model_sd: dict) -> dict:
+    """Warm-start surgery for V0.5.9 "Step 0" (fuse story-progress bits at the
+    head input).
+
+    The actor/critic head weights grew from (out, hidden) to (out, hidden +
+    PROGRESS_DIM) when the progress bits were concatenated at the head input. A
+    pre-Step-0 checkpoint carries the OLD narrow head weights; load_state_dict
+    would reject them on a size mismatch (strict=False only tolerates
+    missing/unexpected KEYS, not shape mismatches on shared keys).
+
+    We RIGHT-PAD the new progress columns with ZERO. Zero columns mean the
+    warm-started policy is BEHAVIORALLY IDENTICAL to the source at step 0
+    (progress contributes nothing), and learns to use the bits from there —
+    gradients flow into the zero columns the moment a story bit turns on. The
+    visual trunk (backbone/fc) and all biases are unchanged, so they transfer
+    verbatim. A checkpoint already at the new width (a V0.5.9 full-resume) has
+    matching shapes and is left untouched. Mutates and returns net_state.
+    """
+    for k in ("actor.weight", "critic.weight", "critic_int.weight"):
+        if k in net_state and k in model_sd and net_state[k].shape != model_sd[k].shape:
+            src = net_state[k]
+            dst = torch.zeros_like(model_sd[k])
+            old_in = src.shape[1]
+            if old_in > dst.shape[1]:
+                raise RuntimeError(
+                    f"checkpoint head {k} is WIDER than the model "
+                    f"({tuple(src.shape)} vs {tuple(dst.shape)}) — not a Step-0 grow"
+                )
+            dst[:, :old_in] = src.to(dst.device, dst.dtype)
+            net_state[k] = dst
+    return net_state
 
 
 def count_novelty_bonus(count_dict: dict, cell, coef: float) -> float:
@@ -188,6 +234,10 @@ class RolloutBuffer:
     rnd_frame: torch.Tensor | None = None      # landed single frame (uint8) for predictor training (frame mode)
     rnd_state: torch.Tensor | None = None      # landed [map_id,x,y] (float32) for predictor training (ram mode)
     rnd_progress: torch.Tensor | None = None   # landed progress bits
+    # Story-progress bits for the POLICY/VALUE net (V0.5.9 "Step 0"). Always
+    # allocated (unlike rnd_progress, which is RND-path only): the net now
+    # consumes these bits every step so the update must replay them.
+    progress: torch.Tensor = field(init=False)
     advantages: torch.Tensor = field(init=False)
     returns: torch.Tensor = field(init=False)
     advantages_int: torch.Tensor = field(init=False)
@@ -204,6 +254,7 @@ class RolloutBuffer:
         progress_dim: int = 0,
         rnd_input: str = "frame",
         state_dim: int = 3,
+        policy_progress_dim: int = 4,
     ) -> "RolloutBuffer":
         z2 = lambda: torch.zeros((n_steps, n_envs), dtype=torch.float32, device=device)
         buf = cls(
@@ -213,6 +264,10 @@ class RolloutBuffer:
             values=z2(),
             rewards=z2(),
             dones=z2(),
+        )
+        # Policy-progress bits: one row per step, always present.
+        buf.progress = torch.zeros(
+            (n_steps, n_envs, policy_progress_dim), dtype=torch.float32, device=device
         )
         if rnd:
             buf.values_int = z2()
@@ -323,7 +378,14 @@ def train(
     else:
         device = torch.device(cfg.device)
 
-    raw_net = ActorCritic(obs_shape, n_actions=n_actions).to(device)
+    # Policy/value net now fuses the story-progress bits at the head input
+    # (V0.5.9 "Step 0"): the pixels can't show whether the parcel is held, so
+    # the net was blind to the fact that flips the optimal direction at Oak.
+    from pokerl.env import ram_map as _ram_map
+    policy_progress_dim = _ram_map.PROGRESS_DIM
+    raw_net = ActorCritic(
+        obs_shape, n_actions=n_actions, progress_dim=policy_progress_dim
+    ).to(device)
     resume_ckpt: dict | None = None  # set iff a FULL-resume dict was loaded
     resume_global_step = 0
     resume_iteration = 0
@@ -345,6 +407,10 @@ def train(
             net_state = loaded["net"]
         else:
             net_state = loaded
+        # V0.5.9 "Step 0": zero-pad a pre-Step-0 checkpoint's narrow head weights
+        # up to the progress-fused width, so the warm-start starts identical to
+        # the source policy and learns to use the story bits (see the helper).
+        net_state = pad_progress_head_weights(net_state, raw_net.state_dict())
         # strict=False so a warm-start from a checkpoint that predates a head
         # (e.g. a 2-head pre-RND checkpoint has no critic_int) loads cleanly —
         # the missing head inits fresh. An UNEXPECTED key, by contrast, means
@@ -463,7 +529,7 @@ def train(
 
     # Disjoint per-rank env seeding. Spaced by 10k so reset seeds don't
     # collide across ranks for any realistic n_envs_local.
-    obs_np, _ = envs.reset(seed=cfg.seed + dctx.rank * 10_000)
+    obs_np, reset_info = envs.reset(seed=cfg.seed + dctx.rank * 10_000)
 
     # RND obs-norm warmup: seed obs_rms from random rollouts so the first
     # intrinsic rewards aren't computed against uninitialized statistics, then
@@ -474,12 +540,21 @@ def train(
             a = np.array([envs.single_action_space.sample() for _ in range(n_envs_local)])
             o, _, _, _, _ = envs.step(a)
             obs_rms.update(o[:, -1:, :, :].astype(np.float64))
-        obs_np, _ = envs.reset(seed=cfg.seed + dctx.rank * 10_000 + 1)
+        obs_np, reset_info = envs.reset(seed=cfg.seed + dctx.rank * 10_000 + 1)
         if dctx.is_main:
             print(f"RND obs-norm warmup done ({cfg.rnd_obs_norm_steps} steps).")
 
     obs_t = torch.from_numpy(obs_np).to(device)
     dones_t = torch.zeros(n_envs_local, dtype=torch.float32, device=device)
+    # Running policy-progress bits paired with obs_t (updated post-step below,
+    # mirroring obs_t = obs_np). Seed from reset info; fall back to zeros (the
+    # curriculum start state has every story bit clear).
+    _rp = reset_info.get("progress") if isinstance(reset_info, dict) else None
+    if _rp is not None:
+        prog_t = torch.as_tensor(np.asarray(_rp, dtype=np.float32), device=device)
+    else:
+        prog_t = torch.zeros((n_envs_local, policy_progress_dim),
+                             dtype=torch.float32, device=device)
 
     # Per-rank batch sizes. minibatch_size in yaml is GLOBAL convention too.
     batch_size_local = cfg.n_steps * n_envs_local
@@ -592,17 +667,18 @@ def train(
         buf = RolloutBuffer.empty(
             cfg.n_steps, n_envs_local, obs_shape, str(device),
             rnd=cfg.rnd_enabled, progress_dim=progress_dim,
-            rnd_input=cfg.rnd_input,
+            rnd_input=cfg.rnd_input, policy_progress_dim=policy_progress_dim,
         )
 
         rollout_t0 = time.perf_counter()
         for step in range(cfg.n_steps):
             global_step += n_envs_global
             buf.obs[step] = obs_t
+            buf.progress[step] = prog_t
             buf.dones[step] = dones_t
 
             with torch.no_grad():
-                logits, values, values_int = net(obs_t)
+                logits, values, values_int = net(obs_t, prog_t)
             dist = Categorical(logits=logits)
             actions = dist.sample()
             log_probs = dist.log_prob(actions)
@@ -623,8 +699,9 @@ def train(
             # boundary mask doesn't throw away the cut future. See the helper.
             rewards_step = apply_truncation_bootstrap(
                 rewards_step, term_np, trunc_np, info,
-                value_fn=lambda o: net(o)[1],
+                value_fn=lambda o, p: net(o, p)[1],
                 gamma=cfg.gamma, n_envs=n_envs_local, device=device,
+                progress_dim=policy_progress_dim,
             )
 
             buf.rewards[step] = rewards_step
@@ -639,6 +716,14 @@ def train(
 
             obs_t = torch.from_numpy(obs_np).to(device)
             dones_t = torch.from_numpy(done_np).to(device).float()
+            # Advance the running policy-progress to match the new obs_t. Under
+            # SAME_STEP autoreset a done env's info["progress"] is already the
+            # reset episode's bits, which correctly pairs with obs_np — same
+            # convention as obs_t above. (The RND-landed novelty below uses the
+            # final-substituted prog_np instead; these are deliberately distinct.)
+            prog_t = torch.as_tensor(
+                np.asarray(info["progress"], dtype=np.float32), device=device
+            )
 
             # --- Intrinsic (RND) reward on the LANDED observation ---
             if cfg.rnd_enabled:
@@ -732,7 +817,7 @@ def train(
         rollout_dt = time.perf_counter() - rollout_t0
 
         with torch.no_grad():
-            _, last_values_t, last_values_int_t = net(obs_t)
+            _, last_values_t, last_values_int_t = net(obs_t, prog_t)
 
         buf.compute_gae(
             last_values=last_values_t,
@@ -769,6 +854,7 @@ def train(
 
         # Flatten (n_steps, n_envs_local, ...) -> (batch_size_local, ...)
         b_obs = buf.obs.reshape((batch_size_local, *obs_shape))
+        b_progress = buf.progress.reshape((batch_size_local, policy_progress_dim))
         b_actions = buf.actions.reshape(batch_size_local)
         b_log_probs = buf.log_probs.reshape(batch_size_local)
         b_advantages = buf.advantages.reshape(batch_size_local)
@@ -802,6 +888,7 @@ def train(
             for start in range(0, batch_size_local, minibatch_size_local):
                 mb_idx = indices[start : start + minibatch_size_local]
                 mb_obs = b_obs[mb_idx]
+                mb_progress = b_progress[mb_idx]
                 mb_actions = b_actions[mb_idx]
                 mb_old_log_probs = b_log_probs[mb_idx]
                 mb_adv = b_advantages[mb_idx]
@@ -829,7 +916,7 @@ def train(
                 else:
                     mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
-                logits, values_new, values_int_new = net(mb_obs)
+                logits, values_new, values_int_new = net(mb_obs, mb_progress)
                 dist = Categorical(logits=logits)
                 new_log_probs = dist.log_prob(mb_actions)
                 entropy = dist.entropy().mean()

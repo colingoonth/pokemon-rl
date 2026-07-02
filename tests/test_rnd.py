@@ -144,6 +144,42 @@ def test_warmstart_two_head_checkpoint_loads_strict_false():
     assert len(missing) == 2  # weight + bias
 
 
+def test_step0_progress_head_padding_preserves_policy():
+    """V0.5.9 warm-start surgery: a pre-Step-0 checkpoint (narrow, progress-blind
+    heads) must load into the progress-fused net, start BEHAVIORALLY IDENTICAL
+    with zero progress, and leave the new progress columns at zero."""
+    from pokerl.agent.networks import ActorCritic as AC
+    from pokerl.agent.ppo import pad_progress_head_weights
+
+    # "Old" net: no progress fusion (progress_dim=0 -> heads take hidden only).
+    old = AC((4, 72, 80), n_actions=7, progress_dim=0)
+    old.eval()
+    # "New" net: Step-0 net with the 4 progress bits fused at the head input.
+    new = AC((4, 72, 80), n_actions=7, progress_dim=PROG)
+
+    state = dict(old.state_dict())
+    pad_progress_head_weights(state, new.state_dict())
+    missing, unexpected = new.load_state_dict(state, strict=False)
+    assert unexpected == []
+    new.eval()
+
+    # New progress columns are exactly zero after the pad.
+    assert torch.count_nonzero(new.actor.weight[:, -PROG:]) == 0
+    assert torch.count_nonzero(new.critic.weight[:, -PROG:]) == 0
+
+    # With zero progress bits, the new net reproduces the old net's outputs.
+    obs = torch.randint(0, 256, (5, 4, 72, 80), dtype=torch.uint8)
+    zero_prog = torch.zeros(5, PROG)
+    with torch.no_grad():
+        old_logits, old_v, _ = old(obs, torch.zeros(5, 0))
+        new_logits, new_v, _ = new(obs, zero_prog)
+    assert torch.allclose(old_logits, new_logits, atol=1e-6)
+    assert torch.allclose(old_v, new_v, atol=1e-6)
+    # NB: because the progress columns start at ZERO, flipping the bits has no
+    # effect on the freshly-padded net — that only emerges once training moves
+    # those weights off zero. The zero-column check above is the invariant.
+
+
 # --- V0.5.6 count-based episodic novelty ------------------------------------
 
 def test_count_bonus_decays_with_revisits():

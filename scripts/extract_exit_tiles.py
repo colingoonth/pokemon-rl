@@ -48,8 +48,9 @@ def main() -> None:
     prev_xy = rm.player_position(mem)
     for _ in range(args.steps):
         obs_t = torch.from_numpy(obs).unsqueeze(0)
+        prog_t = torch.tensor([rm.progress_bits(mem)], dtype=torch.float32)
         with torch.no_grad():
-            logits = net(obs_t)[0]
+            logits = net(obs_t, prog_t)[0]
         action = int(Categorical(logits=logits).sample().item())
         obs, _, term, trunc, _ = env.step(action)
         cur_map = rm.map_id(mem)

@@ -25,6 +25,7 @@ pytestmark = pytest.mark.skipif(
 def test_env_stacked_obs_through_network():
     from pokerl.agent.networks import ActorCritic
     from pokerl.env.pokemon_red_env import ACTIONS, PokemonRedEnv
+    from pokerl.env.ram_map import PROGRESS_DIM
     from pokerl.env.wrappers import FrameStack
 
     env = FrameStack(PokemonRedEnv(headless=True, max_steps=10), k=4)
@@ -34,9 +35,10 @@ def test_env_stacked_obs_through_network():
         assert obs.dtype == np.uint8
 
         net = ActorCritic(obs.shape, n_actions=len(ACTIONS))
+        prog_t = torch.zeros(1, PROGRESS_DIM, dtype=torch.float32)
         with torch.no_grad():
             obs_t = torch.from_numpy(obs).unsqueeze(0)
-            logits, value, value_int = net(obs_t)
+            logits, value, value_int = net(obs_t, prog_t)
         assert logits.shape == (1, len(ACTIONS))
         assert value.shape == (1,)
         assert value_int.shape == (1,)
@@ -46,6 +48,6 @@ def test_env_stacked_obs_through_network():
         assert obs.shape == (4, 72, 80)
         with torch.no_grad():
             obs_t = torch.from_numpy(obs).unsqueeze(0)
-            net(obs_t)
+            net(obs_t, prog_t)
     finally:
         env.close()

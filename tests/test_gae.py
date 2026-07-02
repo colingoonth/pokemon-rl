@@ -96,7 +96,7 @@ def test_truncation_bootstrap_only_truncated_envs():
     rewards = torch.tensor([1.0, 2.0, 3.0])
     out = apply_truncation_bootstrap(
         rewards, term_np, trunc_np, info,
-        value_fn=lambda o: torch.full((o.shape[0],), 10.0),
+        value_fn=lambda o, p: torch.full((o.shape[0],), 10.0),
         gamma=0.9, n_envs=3, device="cpu",
     )
     assert out.tolist() == [1.0, 11.0, 3.0]
@@ -109,7 +109,7 @@ def test_truncation_bootstrap_noop_when_nothing_truncates():
     rewards = torch.tensor([1.0, 2.0])
     out = apply_truncation_bootstrap(
         rewards, np.array([False, False]), np.array([False, False]), info,
-        value_fn=lambda o: torch.zeros(o.shape[0]),
+        value_fn=lambda o, p: torch.zeros(o.shape[0]),
         gamma=0.99, n_envs=2, device="cpu",
     )
     assert out.tolist() == [1.0, 2.0]

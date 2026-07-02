@@ -22,6 +22,7 @@ import torch
 from torch.distributions import Categorical
 
 from pokerl.agent.networks import ActorCritic
+from pokerl.env import ram_map as rm
 from pokerl.env.make import make_env
 from pokerl.env.pokemon_red_env import ACTIONS
 
@@ -79,6 +80,8 @@ def main() -> None:
 
     env = make_env(headless=True, max_steps=args.max_steps, frame_stack=4)
     obs, _ = env.reset(seed=args.seed)
+    # Live RAM view for the story-progress bits the net now consumes (V0.5.9).
+    mem = env.unwrapped.pyboy.memory  # type: ignore[attr-defined]
 
     if args.random:
         net = None
@@ -101,8 +104,9 @@ def main() -> None:
                 action = int(rng.integers(0, env.action_space.n))
             else:
                 obs_t = torch.from_numpy(obs).unsqueeze(0)
+                prog_t = torch.tensor([rm.progress_bits(mem)], dtype=torch.float32)
                 with torch.no_grad():
-                    logits = net(obs_t)[0]  # (logits, value_ext, value_int)
+                    logits = net(obs_t, prog_t)[0]  # (logits, value_ext, value_int)
                 if args.stochastic:
                     action = int(Categorical(logits=logits).sample().item())
                 else:

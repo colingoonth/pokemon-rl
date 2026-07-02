@@ -1,0 +1,55 @@
+# V0.5.9 "Step 0" — PROGRESS-BITS-INTO-NET probe (arm B: observability + count).
+# Warm-start from the 100M V0.5.5 checkpoint.
+#
+# Same fix as arm A (progress bits fused at the policy/value head; warm-start
+# zero-pads the new columns so it starts as the 100M policy and learns to use
+# the bits) — see …_progressbits_probe.yaml for the full diagnosis.
+#
+# ARM B adds subordinate episodic COUNT-novelty (rnd_input=count, int_coef 0.25)
+# on top of the observability fix. Rationale: the backtrack needs the agent to
+# re-find the Viridian Mart (parcel) and re-traverse Route 1 south to Oak; the
+# 100M policy stalls before the Mart, so pure observability (arm A) may lack the
+# exploration to GET the parcel bit to flip in the first place. Count-novelty is
+# episodic + keyed on (map,x,y,progress_bits), so it re-lights already-walked
+# tiles the moment the parcel bit flips — exactly the backtrack. int_coef 0.25
+# keeps it subordinate to the story ladder (v0.5.6's coequal count swamped
+# progress; here it only nudges exploration while the ladder + observability
+# direct).
+#
+# A/B READ: if A stalls but B breaks through -> the wall also needed exploration.
+# If both break through -> observability alone was the fix. If both stall ->
+# observability isn't sufficient; escalate to Step 3 (reverse state-curriculum).
+#
+# WATCH: rungs climb PAST the 3-rung Viridian warmstart into VIRIDIAN_MART ->
+# PARCEL -> RETURN_ROUTE_1 -> RETURN_PALLET -> AT_OAK_PARCEL and STAY.
+run_name: elsa_genoa_storyladder_v0_5_9_progressbits_count_probe
+state_path: states/blue_fight.state
+total_timesteps: 30_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_5_storyladder
+
+# --- Intrinsic novelty: count-based, subordinate to the story ladder ---
+rnd_enabled: true
+rnd_input: count
+count_coef: 1.0
+ext_coef: 2.0
+int_coef: 0.25
+anneal_int_coef: false
+int_gamma: 0.99

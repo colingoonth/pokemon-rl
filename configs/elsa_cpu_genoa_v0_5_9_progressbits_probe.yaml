@@ -1,0 +1,51 @@
+# V0.5.9 "Step 0" — PROGRESS-BITS-INTO-NET probe (arm A: pure observability).
+# Warm-start from the 100M V0.5.5 checkpoint.
+#
+# THE DIAGNOSIS: every reward-landscape attempt (v0.5.6 count, v0.5.7/.8 field)
+# stalled at the Oak's-parcel BACKTRACK. Root cause found this session — the
+# policy/value net was BLIND to the story-progress bits (map pixels can't show
+# whether the parcel is held), so it could not represent "parcel acquired ->
+# reverse direction toward Oak", no matter what the reward did. v0.5.7 stalled
+# (flat field), v0.5.8 FARMED a re-baseline seam in the field (9311 fires / 35
+# tiles, 1/19). The field family is exhausted.
+#
+# THE FIX (Step 0): fuse the 4 progress bits [oaks_parcel, pokedex, beat_brock,
+# pokeballs_from_oak] at the policy/value head input (networks.py ActorCritic).
+# Warm-start surgery zero-pads the new progress columns so the policy starts
+# BEHAVIORALLY IDENTICAL to the 100M policy (reaches Viridian) and *learns* to
+# use the bits from there (ppo.pad_progress_head_weights).
+#
+# ARM A holds the reward at the clean baseline that reached Viridian
+# (RewardV0_5_5_storyladder) and adds ONLY the observability fix, RND OFF — the
+# cleanest isolation of "does seeing the parcel bit let it break the wall?"
+# Paired with arm B (…_count_probe) which adds episodic count-novelty in case
+# the backtrack also needs exploration to re-find the Mart/parcel.
+#
+# WATCH: rungs climb PAST the 3-rung Viridian warmstart into VIRIDIAN_MART ->
+# PARCEL -> RETURN_ROUTE_1 -> RETURN_PALLET -> AT_OAK_PARCEL and STAY.
+run_name: elsa_genoa_storyladder_v0_5_9_progressbits_probe
+state_path: states/blue_fight.state
+total_timesteps: 30_000_000
+n_envs: 144
+max_steps: 32768
+n_steps: 64
+n_epochs: 4
+minibatch_size: 192
+learning_rate: 2.5e-4
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.1
+value_coef: 0.5
+entropy_coef: 0.005
+max_grad_norm: 0.5
+anneal_lr: true
+seed: 0
+log_every: 2
+save_every: 25
+async_envs: true
+torch_threads: 48
+reward_class: RewardV0_5_5_storyladder
+
+# Pure observability arm: no intrinsic curiosity. The story ladder's own rung
+# bonuses + the (now progress-aware) warm-start policy carry exploration.
+rnd_enabled: false
